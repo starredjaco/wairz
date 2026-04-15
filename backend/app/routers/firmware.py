@@ -36,7 +36,12 @@ async def upload_firmware(
     version_label: str | None = Form(None),
     service: FirmwareService = Depends(get_firmware_service),
 ):
-    firmware = await service.upload(project_id, file, version_label=version_label)
+    try:
+        firmware = await service.upload(project_id, file, version_label=version_label)
+    except ValueError as e:
+        # Service raises ValueError for rejectable uploads — e.g. a
+        # password-protected 7z that can't be unwrapped automatically.
+        raise HTTPException(400, str(e))
     return firmware
 
 
