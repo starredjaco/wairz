@@ -45,12 +45,58 @@ def _sanitize_filename(name: str) -> str:
     return name or "firmware.bin"
 
 
+def _zip_is_rootfs(zip_path: str) -> bool:
+    """Check if a ZIP archive contains a Linux root filesystem.
+
+    Looks for top-level directory entries matching standard Linux filesystem
+    markers (etc/ + bin/ or usr/). Handles both flat rootfs archives and
+    archives with a single wrapper directory (e.g. rootfs/etc/, squashfs-root/bin/).
+    """
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = {info.filename for info in zf.infolist()}
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+    # Check for direct top-level rootfs markers
+    def _has_markers(prefix: str) -> bool:
+        has_etc = any(
+            n.startswith(prefix + "etc/") or n == prefix + "etc"
+            for n in names
+        )
+        has_usr_or_bin = any(
+            n.startswith(prefix + d) or n == prefix + d.rstrip("/")
+            for n in names
+            for d in ("usr/", "bin/")
+        )
+        return has_etc and has_usr_or_bin
+
+    if _has_markers(""):
+        return True
+
+    # Check one level deep (e.g. rootfs/etc/, squashfs-root/bin/)
+    top_dirs = {n.split("/", 1)[0] for n in names if "/" in n}
+    for top in top_dirs:
+        if _has_markers(top + "/"):
+            return True
+
+    return False
+
+
 def _extract_firmware_from_zip(zip_path: str, output_dir: str) -> str | None:
     """Extract the main firmware file from a ZIP archive.
 
-    Picks the largest file in the archive (most likely the firmware image).
-    Returns the path to the extracted file, or None if the archive is empty.
+    If the ZIP contains a Linux root filesystem (etc/ + bin/ or usr/),
+    returns None so the ZIP is passed intact to binwalk, which can extract
+    it fully and let the unpack pipeline locate the filesystem root.
+
+    Otherwise picks the largest file in the archive (most likely a firmware
+    image wrapped in ZIP). Returns the path to the extracted file, or None
+    if the archive is empty.
     """
+    if _zip_is_rootfs(zip_path):
+        return None
+
     with zipfile.ZipFile(zip_path, "r") as zf:
         candidates = []
         for info in zf.infolist():
