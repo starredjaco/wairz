@@ -33,10 +33,16 @@ _ELF_ARCH_MAP = {
 }
 
 
-async def run_binwalk_extraction(firmware_path: str, output_dir: str, timeout: int = 600) -> str:
-    """Run binwalk -e to extract firmware contents. Returns stdout+stderr."""
+async def run_binwalk_extraction(firmware_path: str, output_dir: str, timeout: int = 1800) -> str:
+    """Run binwalk with matryoshka recursion to extract firmware contents.
+
+    -M enables matryoshka mode so binwalk re-scans its own outputs; -d 5 caps
+    recursion depth to keep wall-clock bounded. The post-binwalk dispatcher
+    in ``fs_extractors.py`` picks up any filesystems binwalk's signature
+    scanner missed (e.g. vendor-modified SquashFS).
+    """
     proc = await asyncio.create_subprocess_exec(
-        "binwalk", "-e", "-C", output_dir, firmware_path,
+        "binwalk", "-Me", "-d", "5", "-C", output_dir, firmware_path,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
@@ -411,6 +417,8 @@ def detect_kernel(extraction_dir: str, fs_root: str | None) -> str | None:
 
 async def unpack_firmware(firmware_path: str, output_base_dir: str) -> UnpackResult:
     """Orchestrate the full unpacking pipeline."""
+    from .fs_extractors import recursive_extract
+
     result = UnpackResult()
 
     # Step 1: Run binwalk extraction
@@ -426,6 +434,19 @@ async def unpack_firmware(firmware_path: str, output_base_dir: str) -> UnpackRes
         result.error = f"Extraction failed: {e}"
         result.unpack_log = str(e)
         return result
+
+    # Step 1b: Custom recursive pass for filesystem images binwalk missed
+    # (e.g. vendor-modified SquashFS that needs sasquatch, or UBI/JFFS2
+    # blobs binwalk extracted but didn't further unpack). Log-and-continue
+    # on failures; never fails the overall unpack.
+    try:
+        original_size = os.path.getsize(firmware_path)
+    except OSError:
+        original_size = None
+    dispatcher_log = await recursive_extract(
+        extraction_dir, original_size=original_size
+    )
+    result.unpack_log = (result.unpack_log or "") + "\n" + dispatcher_log
 
     # Step 2: Find the filesystem root
     fs_root = find_filesystem_root(extraction_dir)
