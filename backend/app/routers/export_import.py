@@ -65,7 +65,9 @@ async def import_project(
     ):
         raise HTTPException(
             400,
-            "Invalid file type. Please upload a .wairz archive.",
+            "Invalid file type. Please upload a .wairz archive (exported from another "
+            "Wairz instance). To analyze a firmware file (.bin, .img, .trx, etc.), "
+            "use 'New Project' and upload it there instead.",
         )
 
     contents = await file.read()
