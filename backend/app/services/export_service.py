@@ -24,6 +24,26 @@ from app.models.sbom import SbomComponent, SbomVulnerability
 
 ARCHIVE_VERSION = 1
 
+# ZIP format minimum timestamp — 1980-01-01 00:00:00.
+# Files with earlier timestamps (common in firmware: epoch 0, squashfs defaults)
+# must be clamped to this value or zipfile raises ValueError.
+_ZIP_MIN_DATE_TIME = (1980, 1, 1, 0, 0, 0)
+
+
+def _safe_write_file(zf: zipfile.ZipFile, filepath: str, arcname: str) -> None:
+    """Add a file to a ZIP archive, clamping pre-1980 timestamps.
+
+    Python's zipfile module raises ValueError for timestamps before
+    1980-01-01. Firmware filesystems routinely contain files with epoch-0
+    or other pre-1980 dates, so we clamp to the ZIP minimum.
+    """
+    info = zipfile.ZipInfo.from_file(filepath, arcname)
+    if info.date_time < _ZIP_MIN_DATE_TIME:
+        info.date_time = _ZIP_MIN_DATE_TIME
+    info.compress_type = zipfile.ZIP_DEFLATED
+    with open(filepath, "rb") as f:
+        zf.writestr(info, f.read())
+
 
 def _json_serial(obj):
     """JSON serializer for objects not serializable by default."""
@@ -95,7 +115,7 @@ class ExportService:
                 doc_path = doc.get("storage_path")
                 if doc_path and os.path.isfile(doc_path):
                     arcname = f"documents/files/{doc['id']}_{doc['original_filename']}"
-                    zf.write(doc_path, arcname)
+                    _safe_write_file(zf, doc_path, arcname)
 
             # Emulation presets
             zf.writestr("emulation_presets.json", _dumps(presets))
@@ -112,7 +132,7 @@ class ExportService:
                 # Original firmware binary
                 if fw.storage_path and os.path.isfile(fw.storage_path):
                     orig_name = os.path.basename(fw.storage_path)
-                    zf.write(fw.storage_path, f"{fw_prefix}/original/{orig_name}")
+                    _safe_write_file(zf, fw.storage_path, f"{fw_prefix}/original/{orig_name}")
 
                 # Extracted filesystem — walk and add each file
                 extracted_root = self._get_extracted_root(fw)
@@ -452,7 +472,7 @@ class ExportService:
                         "gid": st.st_gid if st else 0,
                     })
                     try:
-                        zf.write(full, arc)
+                        _safe_write_file(zf, full, arc)
                     except (OSError, PermissionError):
                         # Skip unreadable files, note in permissions
                         permissions.append({
