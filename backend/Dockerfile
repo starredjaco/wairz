@@ -65,6 +65,24 @@ RUN wget -q "https://github.com/NationalSecurityAgency/ghidra/releases/download/
     && mv /opt/ghidra_${GHIDRA_VERSION}_PUBLIC /opt/ghidra \
     && rm /tmp/ghidra.zip
 
+# Build Ghidra native components on ARM64 (decompiler, sleigh, demangler).
+# The pre-built Ghidra release only ships x86_64 Linux binaries. On ARM64
+# (e.g. Apple Silicon Macs running Docker), the decompiler is missing,
+# breaking decompilation, dataflow tracing, and string ref resolution.
+# The Gradle build system included in the distribution handles this.
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+        echo "ARM64 detected — building Ghidra native components..." \
+        && apt-get update && apt-get install -y --no-install-recommends flex bison \
+        && rm -rf /var/lib/apt/lists/* \
+        && cd /opt/ghidra/support/gradle \
+        && chmod +x gradlew \
+        && JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64 \
+           ./gradlew buildNatives \
+        && echo "Ghidra native build complete for ARM64"; \
+    else \
+        echo "x86_64 detected — using pre-built Ghidra natives"; \
+    fi
+
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
