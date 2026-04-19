@@ -83,6 +83,7 @@ class ProjectState:
     endianness: str | None = None
     extracted_path: str = ""
     extraction_dir: str | None = None
+    firmware_loaded: bool = False
 
 
 def _resolve_storage_root() -> str | None:
@@ -292,12 +293,18 @@ async def _load_project(
     session: AsyncSession,
     project_id: uuid.UUID,
     firmware_id: uuid.UUID | None = None,
-) -> tuple[Project, Firmware, int]:
+) -> tuple[Project, Firmware | None, int]:
     """Load and validate the project and its active firmware.
 
     Returns a tuple of (project, selected_firmware, total_firmware_count).
+    selected_firmware is None when the project has no firmware or no
+    unpacked firmware — the MCP server can still start in this state
+    and serve project-management tools.
+
     The count lets callers log an informative message when the project has
     multiple firmwares so users know they can select a different one.
+
+    Raises ValueError only if the project itself doesn't exist.
     """
     project = await session.get(Project, project_id)
     if not project:
@@ -305,7 +312,10 @@ async def _load_project(
 
     stmt = select(Firmware).where(Firmware.project_id == project_id)
     firmwares = list((await session.execute(stmt)).scalars().all())
-    firmware = _select_firmware(firmwares, firmware_id)
+    try:
+        firmware = _select_firmware(firmwares, firmware_id)
+    except ValueError:
+        return project, None, len(firmwares)
     return project, firmware, len(firmwares)
 
 
@@ -328,15 +338,26 @@ async def _load_project_state(
         state.project_id = project.id
         state.project_name = project.name
         state.project_desc = project.description or ""
-        state.firmware_id = firmware.id
-        state.firmware_filename = firmware.original_filename or "unknown"
-        state.architecture = firmware.architecture
-        state.endianness = firmware.endianness
-        state.extracted_path = firmware.extracted_path
-        state.extraction_dir = firmware.extraction_dir
+
+        if firmware is not None:
+            state.firmware_id = firmware.id
+            state.firmware_filename = firmware.original_filename or "unknown"
+            state.architecture = firmware.architecture
+            state.endianness = firmware.endianness
+            state.extracted_path = firmware.extracted_path
+            state.extraction_dir = firmware.extraction_dir
+            state.firmware_loaded = True
+        else:
+            state.firmware_id = uuid.UUID(int=0)
+            state.firmware_filename = "unknown"
+            state.architecture = None
+            state.endianness = None
+            state.extracted_path = ""
+            state.extraction_dir = None
+            state.firmware_loaded = False
 
     # Apply path translation
-    if host_storage_root:
+    if host_storage_root and state.firmware_loaded:
         state.extracted_path = _translate_path(state.extracted_path, host_storage_root)
         if state.extraction_dir:
             state.extraction_dir = _translate_path(state.extraction_dir, host_storage_root)
@@ -379,38 +400,59 @@ async def run_server(
         logger.error(str(exc))
         sys.exit(1)
 
-    if firmware_count > 1 and firmware_id is None:
+    if not state.firmware_loaded:
+        if firmware_count == 0:
+            logger.warning(
+                "Project '%s' has no firmware uploaded. The MCP server will start, "
+                "but analysis tools will not work until firmware is uploaded and "
+                "unpacked. Use the Wairz web UI or POST /api/v1/projects/%s/firmware "
+                "to upload firmware.",
+                state.project_name,
+                project_id,
+            )
+        else:
+            logger.warning(
+                "Project '%s' has %d firmware(s), but none have been unpacked. "
+                "The MCP server will start, but analysis tools will not work until "
+                "firmware is unpacked. Trigger unpack via the web UI or "
+                "POST /api/v1/projects/%s/firmware/<id>/unpack.",
+                state.project_name,
+                firmware_count,
+                project_id,
+            )
+    else:
+        if firmware_count > 1 and firmware_id is None:
+            logger.info(
+                "Project has %d firmware versions; selected '%s' (%s) as the active firmware. "
+                "Pass --firmware-id <uuid> to select a different one, or use the "
+                "list_firmware_versions MCP tool to see all versions.",
+                firmware_count,
+                state.firmware_filename,
+                state.firmware_id,
+            )
+
+        if not os.path.isdir(state.extracted_path):
+            logger.error(
+                "Extracted firmware path does not exist: %s",
+                state.extracted_path,
+            )
+            logger.error(
+                "The database stores Docker-internal paths. To fix this, either:\n"
+                "  1. Run the MCP server inside Docker:\n"
+                "     docker exec -i wairz-backend-1 uv run wairz-mcp --project-id %s\n"
+                "  2. Set STORAGE_ROOT in .env to point to a local copy of the firmware data",
+                project_id,
+            )
+            sys.exit(1)
+
         logger.info(
-            "Project has %d firmware versions; selected '%s' (%s) as the active firmware. "
-            "Pass --firmware-id <uuid> to select a different one, or use the "
-            "list_firmware_versions MCP tool to see all versions.",
-            firmware_count,
+            "Loaded project '%s' — firmware: %s (%s, %s)",
+            state.project_name,
             state.firmware_filename,
-            state.firmware_id,
+            state.architecture or "unknown arch",
+            state.endianness or "unknown endian",
         )
-
-    if not os.path.isdir(state.extracted_path):
-        logger.error(
-            "Extracted firmware path does not exist: %s",
-            state.extracted_path,
-        )
-        logger.error(
-            "The database stores Docker-internal paths. To fix this, either:\n"
-            "  1. Run the MCP server inside Docker:\n"
-            "     docker exec -i wairz-backend-1 uv run wairz-mcp --project-id %s\n"
-            "  2. Set STORAGE_ROOT in .env to point to a local copy of the firmware data",
-            project_id,
-        )
-        sys.exit(1)
-
-    logger.info(
-        "Loaded project '%s' — firmware: %s (%s, %s)",
-        state.project_name,
-        state.firmware_filename,
-        state.architecture or "unknown arch",
-        state.endianness or "unknown endian",
-    )
-    logger.info("Firmware root: %s", state.extracted_path)
+        logger.info("Firmware root: %s", state.extracted_path)
 
     # Build tool registry
     registry = _build_tool_registry()
@@ -423,12 +465,20 @@ async def run_server(
             f"Project: {state.project_name}",
             f"Project ID: {state.project_id}",
             f"Description: {state.project_desc or '(none)'}",
-            f"Firmware: {state.firmware_filename}",
-            f"Firmware ID: {state.firmware_id}",
-            f"Architecture: {state.architecture or 'unknown'}",
-            f"Endianness: {state.endianness or 'unknown'}",
-            f"Extracted Path: {state.extracted_path}",
         ]
+        if state.firmware_loaded:
+            lines.extend([
+                f"Firmware: {state.firmware_filename}",
+                f"Firmware ID: {state.firmware_id}",
+                f"Architecture: {state.architecture or 'unknown'}",
+                f"Endianness: {state.endianness or 'unknown'}",
+                f"Extracted Path: {state.extracted_path}",
+            ])
+        else:
+            lines.append(
+                "Firmware: (none loaded — upload and unpack firmware via the "
+                "Wairz web UI to enable analysis tools)"
+            )
         return "\n".join(lines)
 
     registry.register(
@@ -472,7 +522,7 @@ async def run_server(
 
         old_name = state.project_name
         old_id = state.project_id
-        old_firmware_id = state.firmware_id
+        old_firmware_id = state.firmware_id if state.firmware_loaded else None
 
         try:
             await _load_project_state(
@@ -485,7 +535,7 @@ async def run_server(
         except ValueError as exc:
             return f"Error: {exc}"
 
-        if not os.path.isdir(state.extracted_path):
+        if state.firmware_loaded and not os.path.isdir(state.extracted_path):
             # Revert to old project + firmware
             try:
                 await _load_project_state(
@@ -513,10 +563,18 @@ async def run_server(
         lines = [
             f"Switched to project '{state.project_name}'.",
             f"  Project ID: {state.project_id}",
-            f"  Firmware: {state.firmware_filename}",
-            f"  Architecture: {state.architecture or 'unknown'}",
-            f"  Endianness: {state.endianness or 'unknown'}",
         ]
+        if state.firmware_loaded:
+            lines.extend([
+                f"  Firmware: {state.firmware_filename}",
+                f"  Architecture: {state.architecture or 'unknown'}",
+                f"  Endianness: {state.endianness or 'unknown'}",
+            ])
+        else:
+            lines.append(
+                "  Firmware: (none loaded — upload and unpack firmware to "
+                "enable analysis tools)"
+            )
         return "\n".join(lines)
 
     registry.register(
@@ -603,11 +661,27 @@ async def run_server(
             )
         return tools
 
+    # Tools that work without firmware loaded
+    _NO_FIRMWARE_TOOLS = {
+        "get_project_info", "switch_project", "list_projects",
+        "list_firmware_versions",
+    }
+
     # --- Tool dispatch ---
     @server.call_tool()
     async def call_tool(
         name: str, arguments: dict
     ) -> list[TextContent]:
+        if not state.firmware_loaded and name not in _NO_FIRMWARE_TOOLS:
+            return [TextContent(
+                type="text",
+                text=(
+                    "Error: No firmware is loaded for this project. "
+                    "Upload and unpack firmware via the Wairz web UI before "
+                    "using analysis tools. You can also use switch_project to "
+                    "change to a project that has firmware available."
+                ),
+            )]
         async with session_factory() as session:
             context = ToolContext(
                 project_id=state.project_id,
