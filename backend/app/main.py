@@ -26,13 +26,36 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+]
+ALLOWED_HOSTS = {
+    "localhost", "localhost:3000", "localhost:8000",
+    "127.0.0.1", "127.0.0.1:3000", "127.0.0.1:8000",
+}
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def origin_host_guard(request: Request, call_next):
+    # CSRF + DNS-rebinding guard for the localhost-bound backend.
+    host = request.headers.get("host", "")
+    if host not in ALLOWED_HOSTS:
+        return JSONResponse(status_code=403, content={"detail": "host not allowed"})
+    origin = request.headers.get("origin")
+    if origin and origin not in ALLOWED_ORIGINS:
+        return JSONResponse(status_code=403, content={"detail": "origin not allowed"})
+    return await call_next(request)
 
 app.include_router(projects.router)
 app.include_router(firmware.router)
