@@ -56,67 +56,95 @@ async def run_binwalk_extraction(firmware_path: str, output_dir: str, timeout: i
     return stdout.decode(errors="replace").replace("\x00", "")
 
 
-def _has_linux_markers(path: str) -> bool:
-    """Check if a directory has the standard Linux filesystem markers."""
+# Standard Linux/embedded filesystem layout names. We require >= _MIN_MARKERS
+# of these to consider a directory a plausible rootfs. Note this includes some
+# vendor-specific names (init, ko) seen in real embedded images that don't ship
+# /etc — e.g. Wyze cameras put config in /init/.
+_FS_MARKER_NAMES = frozenset({
+    "bin", "sbin", "etc", "etc_ro", "usr", "lib", "lib64",
+    "var", "tmp", "dev", "proc", "sys", "root", "home",
+    "init", "ko", "mnt", "opt", "boot", "run",
+})
+
+_MIN_MARKERS = 2
+
+
+def _count_fs_markers(path: str) -> int:
+    """Count standard Linux/embedded filesystem layout names at *path*."""
     try:
-        all_entries = set(os.listdir(path))
+        entries = set(os.listdir(path))
     except OSError:
-        return False
-    has_etc = "etc" in all_entries or "etc_ro" in all_entries
-    has_usr_or_bin = "usr" in all_entries or "bin" in all_entries
-    return has_etc and has_usr_or_bin
+        return 0
+    return len(entries & _FS_MARKER_NAMES)
 
 
-def _etc_entry_count(path: str) -> int:
-    """Count entries in the etc/ (or etc_ro/) directory as a quality signal."""
-    for name in ("etc", "etc_ro"):
-        etc_path = os.path.join(path, name)
-        if os.path.isdir(etc_path) or os.path.islink(etc_path):
-            try:
-                return len(os.listdir(etc_path))
-            except OSError:
-                return 0
-    return 0
+def _has_linux_markers(path: str) -> bool:
+    """Whether *path* looks like a Linux/embedded filesystem root.
+
+    Requires at least ``_MIN_MARKERS`` of the standard layout names. We don't
+    hard-require ``/etc`` because real embedded firmware (Wyze, some Ingenic
+    SoCs) ships config in vendor dirs like ``/init/`` instead.
+    """
+    return _count_fs_markers(path) >= _MIN_MARKERS
 
 
 def find_filesystem_root(extraction_dir: str) -> str | None:
-    """Find the extracted filesystem root by looking for Linux directory markers.
+    """Find the extracted filesystem root.
 
-    Prioritises directories with well-known root names produced by binwalk
-    (e.g. squashfs-root, jffs2-root) and picks the candidate whose etc/
-    directory has the most entries — empty placeholder dirs from overlapping
-    extractions are deprioritised automatically.
+    Strategy (preferring shallow, known-named roots over deep heuristic matches):
+
+    1. If a directory whose name matches a known binwalk root pattern
+       (``squashfs-root``, ``jffs2-root``, ``squashfs-root-0`` etc.) exists,
+       prefer the SHALLOWEST one. Tie-break on marker count, then path.
+       Stop descending into named roots — anything inside one is *part of*
+       that rootfs, not a separate candidate.
+
+    2. Otherwise, fall back to any directory with >= ``_MIN_MARKERS`` standard
+       layout names. Again prefer shallowest. Prune the walk on a hit so we
+       don't pick e.g. ``bin/busybox/bin/`` over the actual rootfs.
+
+    3. Otherwise return ``None``. We deliberately do NOT fall back to "largest
+       directory by entry count" — that bug picked busybox-installed bin/
+       trees as the mount root for any firmware lacking /etc.
     """
-    candidates: list[tuple[str, int, int]] = []  # (path, priority, etc_count)
+    extraction_real = os.path.realpath(extraction_dir)
+    base_depth = extraction_real.count(os.sep)
+
+    # (depth, -marker_count, path) — sorted ascending picks shallowest, then
+    # most markers, then lexical path order for stable results.
+    named_candidates: list[tuple[int, int, str]] = []
+    marker_candidates: list[tuple[int, int, str]] = []
 
     for root, dirs, _files in os.walk(extraction_dir):
-        # os.walk() only lists real directories in `dirs`, not symlinks.
-        # Firmware often has standard dirs as symlinks (e.g. /etc -> /dev/null,
-        # /bin -> /usr/bin for merged-usr), so use listdir to see everything.
-        if not _has_linux_markers(root):
+        # Skip the extraction_dir itself — it'll never be a rootfs.
+        if os.path.realpath(root) == extraction_real:
             continue
 
+        depth = os.path.realpath(root).count(os.sep) - base_depth
         dirname = os.path.basename(root)
-        # Known binwalk root names get priority boost
-        priority = 10 if dirname in _FS_ROOT_NAMES else 0
-        etc_count = _etc_entry_count(root)
-        candidates.append((root, priority, etc_count))
+        marker_count = _count_fs_markers(root)
 
-    if candidates:
-        # Sort by: priority descending, then etc entry count descending
-        candidates.sort(key=lambda c: (c[1], c[2]), reverse=True)
-        return candidates[0][0]
+        if _ROOT_DIR_RE.match(dirname):
+            named_candidates.append((depth, -marker_count, root))
+            # Don't descend into a named root — its children are not separate
+            # rootfs candidates.
+            dirs.clear()
+            continue
 
-    # Fallback: find largest directory by entry count
-    best_dir = None
-    best_count = 0
-    for root, dirs, files in os.walk(extraction_dir):
-        count = len(dirs) + len(files)
-        if count > best_count:
-            best_count = count
-            best_dir = root
+        if marker_count >= _MIN_MARKERS:
+            marker_candidates.append((depth, -marker_count, root))
+            # Prune to avoid picking nested busybox/bin-style sub-roots.
+            dirs.clear()
 
-    return best_dir
+    if named_candidates:
+        named_candidates.sort()
+        return named_candidates[0][2]
+
+    if marker_candidates:
+        marker_candidates.sort()
+        return marker_candidates[0][2]
+
+    return None
 
 
 def detect_architecture(fs_root: str) -> tuple[str | None, str | None]:

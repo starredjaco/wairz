@@ -249,7 +249,6 @@ async def _handle_check_setuid_binaries(input: dict, context: ToolContext) -> st
     """Find all setuid/setgid files in the firmware filesystem."""
     input_path = input.get("path") or "/"
     search_root = context.resolve_path(input_path)
-    real_root = context.real_root_for(input_path)
 
     setuid_files: list[str] = []
     setgid_files: list[str] = []
@@ -265,7 +264,9 @@ async def _handle_check_setuid_binaries(input: dict, context: ToolContext) -> st
             if not stat.S_ISREG(st.st_mode):
                 continue
 
-            rel = _rel(abs_path, real_root)
+            rel = context.to_virtual_path(abs_path)
+            if rel is None:
+                continue
             mode = st.st_mode
 
             if mode & stat.S_ISUID:
@@ -456,7 +457,6 @@ async def _handle_check_filesystem_permissions(input: dict, context: ToolContext
     """Check for world-writable files and weak permissions on sensitive files."""
     input_path = input.get("path") or "/"
     search_root = context.resolve_path(input_path)
-    real_root = context.real_root_for(input_path)
 
     world_writable: list[str] = []
     sensitive_weak: list[str] = []
@@ -471,7 +471,9 @@ async def _handle_check_filesystem_permissions(input: dict, context: ToolContext
                 continue
 
             mode = st.st_mode
-            rel = _rel(abs_path, real_root)
+            rel = context.to_virtual_path(abs_path)
+            if rel is None:
+                continue
             perm_str = oct(mode)[-4:]
 
             # World-writable files (not symlinks)
@@ -592,8 +594,11 @@ def _is_pem_file(path: str) -> bool:
         return False
 
 
-def _audit_certificate(cert_data: bytes, file_path: str, real_root: str) -> dict:
-    """Parse and audit a single certificate. Returns a dict with info and issues."""
+def _audit_certificate(cert_data: bytes, file_path: str, rel_path: str) -> dict:
+    """Parse and audit a single certificate. Returns a dict with info and issues.
+
+    *rel_path* is the virtual firmware path used purely for display.
+    """
     try:
         from cryptography import x509
         from cryptography.hazmat.primitives.asymmetric import rsa, ec, dsa
@@ -614,8 +619,6 @@ def _audit_certificate(cert_data: bytes, file_path: str, real_root: str) -> dict
 
     if cert is None:
         return {"error": f"Failed to parse certificate: {parse_error}"}
-
-    rel_path = "/" + os.path.relpath(file_path, real_root)
     now = datetime.now(timezone.utc)
 
     # Extract info
@@ -719,8 +722,6 @@ def _audit_certificate(cert_data: bytes, file_path: str, real_root: str) -> dict
 
 async def _handle_analyze_certificate(input: dict, context: ToolContext) -> str:
     """Parse and audit X.509 certificates found in the firmware."""
-    input_path = input.get("path") or "/"
-    real_root = context.real_root_for(input_path)
     search_path = input.get("path")
 
     # Resolve the extracted root for cert file searching
@@ -738,7 +739,11 @@ async def _handle_analyze_certificate(input: dict, context: ToolContext) -> str:
         except (OSError, PermissionError):
             continue
 
-        result = _audit_certificate(cert_data, cert_file, real_root)
+        rel_path = context.to_virtual_path(cert_file)
+        if rel_path is None:
+            continue
+        result = _audit_certificate(cert_data, cert_file, rel_path)
+        result["path"] = rel_path
         if "error" not in result:
             results.append(result)
 
