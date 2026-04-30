@@ -513,6 +513,8 @@ class SbomService:
 
     def _scan_kernel_version(self) -> None:
         """Detect Linux kernel version from modules directory and release files."""
+        kernel_found = False
+
         # Check /lib/modules/*/
         modules_dir = self._abs_path("/lib/modules")
         if os.path.isdir(modules_dir):
@@ -536,15 +538,66 @@ class SbomService:
                             metadata={"full_version": entry},
                         )
                         self._add_component(comp)
+                        kernel_found = True
                         break  # Usually only one kernel version
             except OSError:
                 pass
+
+        # Fallback: scan any .ko file's vermagic= string. Vendor firmware often
+        # ships modules in non-standard dirs (Wyze uses /ko/ not /lib/modules/).
+        if not kernel_found:
+            self._scan_kernel_from_ko_vermagic()
 
         # Check /etc/os-release, /etc/openwrt_release for distro info
         for rel_file in ["/etc/os-release", "/etc/openwrt_release"]:
             abs_path = self._abs_path(rel_file)
             if os.path.isfile(abs_path):
                 self._parse_os_release(abs_path, rel_file)
+
+    def _scan_kernel_from_ko_vermagic(self) -> None:
+        """Find the first .ko file and parse its vermagic string for kernel version.
+
+        Each kernel module embeds the kernel it was compiled against in a
+        ``vermagic=<version> <flags>`` rodata string. Standard kernel build
+        guarantees vermagic format, so this is high-confidence.
+        """
+        vermagic_re = re.compile(rb"vermagic=([\d.]+(?:-\S+)?)")
+
+        for dirpath, _dirs, files in safe_walk(self.extracted_root):
+            for name in files:
+                if not name.endswith(".ko"):
+                    continue
+                abs_path = os.path.join(dirpath, name)
+                if not os.path.isfile(abs_path) or os.path.islink(abs_path):
+                    continue
+                try:
+                    with open(abs_path, "rb") as f:
+                        data = f.read(MAX_BINARY_READ)
+                except OSError:
+                    continue
+                m = vermagic_re.search(data)
+                if not m:
+                    continue
+                full_version = m.group(1).decode("ascii", errors="replace")
+                base_match = re.match(r"(\d+\.\d+\.\d+)", full_version)
+                if not base_match:
+                    continue
+                version = base_match.group(1)
+                rel_path = "/" + os.path.relpath(abs_path, self.extracted_root)
+                comp = IdentifiedComponent(
+                    name="linux-kernel",
+                    version=version,
+                    type="operating-system",
+                    cpe=f"cpe:2.3:o:linux:linux_kernel:{version}:*:*:*:*:*:*:*",
+                    purl=self._build_purl("linux", version),
+                    supplier="linux",
+                    detection_source="ko_vermagic",
+                    detection_confidence="high",
+                    file_paths=[rel_path],
+                    metadata={"full_version": full_version},
+                )
+                self._add_component(comp)
+                return  # one kernel per firmware
 
     def _parse_os_release(self, abs_path: str, rel_path: str) -> None:
         """Parse os-release or openwrt_release for distro identification."""
@@ -631,7 +684,9 @@ class SbomService:
 
         # Common locations where the real busybox binary (or a symlink to
         # it) lives.  We also check /bin/sh since it's almost always a
-        # symlink to busybox on embedded systems.
+        # symlink to busybox on embedded systems. Vendor-specific layouts
+        # (Wyze keeps it at /bin/busybox/bin/busybox) are picked up by the
+        # walk-fallback below.
         candidates = [
             "/bin/busybox",
             "/bin/busybox.nosuid",
@@ -639,8 +694,34 @@ class SbomService:
             "/usr/bin/busybox",
             "/sbin/busybox",
             "/bin/sh",
+            "/bin/busybox/bin/busybox",      # Wyze cameras
+            "/bin/busybox/sbin/busybox",
         ]
 
+        if self._scan_busybox_at(candidates):
+            return
+
+        # Walk-fallback: search every directory under /bin, /sbin, /usr/bin,
+        # /usr/sbin for a file literally named "busybox". This catches vendor
+        # layouts the candidates list misses.
+        walk_dirs = ["/bin", "/sbin", "/usr/bin", "/usr/sbin"]
+        for walk_dir in walk_dirs:
+            abs_walk = self._abs_path(walk_dir)
+            if not os.path.isdir(abs_walk):
+                continue
+            extra_candidates: list[str] = []
+            for dirpath, _dirs, files in safe_walk(abs_walk):
+                for name in files:
+                    if name == "busybox":
+                        full = os.path.join(dirpath, name)
+                        if os.path.isfile(full) and not os.path.islink(full):
+                            rel = "/" + os.path.relpath(full, self.extracted_root)
+                            extra_candidates.append(rel)
+            if extra_candidates and self._scan_busybox_at(extra_candidates):
+                return
+
+    def _scan_busybox_at(self, candidates: list[str]) -> bool:
+        """Try each candidate path for a BusyBox banner. Returns True on hit."""
         checked_realpaths: set[str] = set()
 
         for candidate in candidates:
@@ -670,10 +751,14 @@ class SbomService:
             except OSError:
                 continue
 
-            # Read and search for BusyBox version string
+            # Read and search for BusyBox version string. BusyBox banners
+            # often live deep in rodata (past 256KB), so read the whole file.
+            # BusyBox is typically <2MB even with all applets compiled in.
             try:
+                if os.path.getsize(real_path) > 4 * 1024 * 1024:
+                    continue  # Outsized; skip rather than read 4MB+
                 with open(real_path, "rb") as f:
-                    data = f.read(MAX_BINARY_READ)
+                    data = f.read()
             except OSError:
                 continue
 
@@ -695,7 +780,9 @@ class SbomService:
                     metadata={"detection_note": "dedicated busybox scan"},
                 )
                 self._add_component(comp)
-                return  # Found it, no need to check more candidates
+                return True
+
+        return False
 
     # ------------------------------------------------------------------
     # Dedicated C library detection
@@ -958,8 +1045,9 @@ class SbomService:
                     component_name = lib_info["name"]
 
                     # If the version is useless, try to extract from binary content.
-                    # If content extraction also fails, skip — a dedicated scanner
-                    # or the binary string scanner will find the real version.
+                    # If content extraction also fails, skip — a sibling library
+                    # (e.g. libmbedtls.so when libmbedcrypto.so has no banner) may
+                    # still yield the real version when we get to it.
                     if self._is_useless_version(version):
                         content_version = self._extract_version_from_library_content(
                             abs_path, component_name
