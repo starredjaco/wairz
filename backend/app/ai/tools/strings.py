@@ -69,6 +69,32 @@ _CREDENTIAL_PATTERNS = [
     re.compile(r"credential\s*[=:]\s*(\S+)", re.IGNORECASE),
 ]
 
+# Hex-string patterns for binary rodata scanning. Embedded firmware secrets
+# (app_id, app_secret, AES keys, signing keys) are commonly stored as ASCII
+# hex strings of these well-known lengths:
+#   32 hex chars → MD5 / 128-bit key / UUID without dashes / app_id
+#   40 hex chars → SHA-1 / 160-bit key
+#   64 hex chars → SHA-256 / 256-bit key
+# We deliberately don't match shorter widths (too noisy) or longer (rare).
+_HEX_SECRET_PATTERNS = (
+    (re.compile(r"^[0-9a-fA-F]{32}$"), "32-hex (MD5/128-bit key/app_id-shaped)"),
+    (re.compile(r"^[0-9a-fA-F]{40}$"), "40-hex (SHA-1/160-bit key)"),
+    (re.compile(r"^[0-9a-fA-F]{64}$"), "64-hex (SHA-256/256-bit key)"),
+)
+
+# Strings to exclude even if they match a secret pattern. These appear in
+# ELF metadata (build IDs, debug info) and are not exploitable secrets.
+_HEX_FALSE_POSITIVE_STRINGS = frozenset({
+    "0" * 32, "0" * 40, "0" * 64,
+    "f" * 32, "f" * 40, "f" * 64,
+    "F" * 32, "F" * 40, "F" * 64,
+})
+
+# Magic-looking ALL-CAPS prefixes followed by digits — embedded vendors often
+# use these as keys (e.g. ``_MEARI56565099`` is a Wyze AES key). High false-
+# positive rate, so we tag findings as medium confidence and require length>=12.
+_MAGIC_KEY_RE = re.compile(r"^_?[A-Z][A-Z0-9_]{4,}\d{4,}$")
+
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -163,6 +189,84 @@ def _is_text_file(path: str) -> bool:
         return b"\x00" not in chunk
     except (OSError, PermissionError):
         return False
+
+
+def _is_elf_file(path: str) -> bool:
+    """Check if a file is an ELF binary by magic bytes."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"\x7fELF"
+    except (OSError, PermissionError):
+        return False
+
+
+async def _extract_data_strings(path: str, min_length: int = 8) -> list[str]:
+    """Run ``strings -d -n <min_length>`` against an ELF binary.
+
+    ``-d`` restricts extraction to data sections (.rodata, .data) which is
+    where secrets typically live. This avoids matching against symbol-table
+    junk and code-section strings, lowering the false-positive rate.
+
+    Returns a list of strings (deduplicated, in extraction order).
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "strings", "-d", "-n", str(min_length), path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except (OSError, asyncio.TimeoutError):
+        return []
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in stdout.decode("utf-8", errors="replace").splitlines():
+        s = line.strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def _classify_binary_string(s: str) -> tuple[str, str] | None:
+    """Identify a string as a likely secret. Returns (category, label) or None.
+
+    *category* is ``"high"`` for fixed-shape hex secrets and ``"medium"`` for
+    magic-key-shaped strings (false-positive prone but worth flagging).
+    """
+    if s in _HEX_FALSE_POSITIVE_STRINGS:
+        return None
+    for pat, label in _HEX_SECRET_PATTERNS:
+        if pat.match(s):
+            return ("high", label)
+    if len(s) >= 12 and _MAGIC_KEY_RE.match(s):
+        return ("medium", "magic-key-shaped (uppercase prefix + digits)")
+    return None
+
+
+async def _scan_binary_for_credentials(
+    abs_path: str, virtual_path: str, results: list[dict[str, str]]
+) -> None:
+    """Extract ELF rodata strings and flag anything secret-shaped.
+
+    Appends findings to *results* in place. Mutates nothing else.
+    """
+    strings = await _extract_data_strings(abs_path, min_length=8)
+    for s in strings:
+        if len(results) >= MAX_CRED_RESULTS:
+            return
+        classification = _classify_binary_string(s)
+        if classification is None:
+            continue
+        confidence, label = classification
+        results.append({
+            "file": virtual_path,
+            "line": "rodata",
+            "match": f"{s}  [{label}]",
+            "entropy": f"{_shannon_entropy(s):.2f}",
+            "category": f"binary_secret_{confidence}",
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +602,13 @@ async def _handle_find_hardcoded_credentials(
             issues = _analyze_passwd_file(passwd_path, f"/{passwd_rel}", results)
             auth_issues.extend(issues)
 
-    # Walk filesystem for credential patterns
+    # Walk filesystem for credential patterns. Two passes per file:
+    #   - text files: line-by-line regex match against _CREDENTIAL_PATTERNS
+    #   - ELF binaries: rodata-strings scan for secret-shaped tokens
+    # The binary pass is the important one for embedded firmware where the
+    # interesting credentials live in compiled-in literals, not /etc/.
+    binaries_to_scan: list[tuple[str, str]] = []  # (abs_path, virtual_path)
+
     for dirpath, _dirs, files in safe_walk(search_path):
         if len(results) >= MAX_CRED_RESULTS:
             break
@@ -509,12 +619,21 @@ async def _handle_find_hardcoded_credentials(
             abs_path = os.path.join(dirpath, name)
             if not os.path.isfile(abs_path):
                 continue
+            if os.path.getsize(abs_path) > 50_000_000:  # 50MB hard cap
+                continue
+
+            virtual_path = context.to_virtual_path(abs_path)
+            if virtual_path is None:
+                continue
+
+            if _is_elf_file(abs_path):
+                binaries_to_scan.append((abs_path, virtual_path))
+                continue
+
             if os.path.getsize(abs_path) > 1_000_000:
                 continue
             if not _is_text_file(abs_path):
                 continue
-
-            rel_path = "/" + os.path.relpath(abs_path, real_root)
 
             try:
                 with open(abs_path, "r", errors="replace") as f:
@@ -527,7 +646,7 @@ async def _handle_find_hardcoded_credentials(
                                 value = m.group(1)
                                 entropy = _shannon_entropy(value)
                                 results.append({
-                                    "file": rel_path,
+                                    "file": virtual_path,
                                     "line": str(line_num),
                                     "match": line.strip()[:200],
                                     "entropy": f"{entropy:.2f}",
@@ -536,6 +655,13 @@ async def _handle_find_hardcoded_credentials(
                                 break  # one match per line
             except (OSError, PermissionError):
                 continue
+
+    # Pass 2: ELF binary rodata. Run after text scan so that the result budget
+    # leaves room for binary findings even when text matches are noisy.
+    for abs_path, virtual_path in binaries_to_scan:
+        if len(results) >= MAX_CRED_RESULTS:
+            break
+        await _scan_binary_for_credentials(abs_path, virtual_path, results)
 
     if not results and not auth_issues:
         return "No hardcoded credentials found."
@@ -549,7 +675,34 @@ async def _handle_find_hardcoded_credentials(
         parts.extend(auth_issues)
         parts.append("")
 
-    # Separate remaining results by entropy
+    # ELF rodata findings — these are the high-signal hits for embedded firmware,
+    # so render them before the noisier text-pattern matches.
+    binary_high = [r for r in results if r.get("category") == "binary_secret_high"]
+    binary_medium = [r for r in results if r.get("category") == "binary_secret_medium"]
+
+    if binary_high:
+        parts.append(
+            f"## Hardcoded Secrets in Binary rodata (high confidence) — {len(binary_high)}"
+        )
+        for r in binary_high:
+            parts.append(f"  {r['file']}:{r['line']}  entropy={r['entropy']}")
+            parts.append(f"    {r['match']}")
+        parts.append("")
+
+    if binary_medium:
+        parts.append(
+            f"## Suspected Secrets in Binary rodata (medium confidence) — {len(binary_medium)}"
+        )
+        parts.append(
+            "  These match magic-key heuristics (uppercase prefix + digits). "
+            "Verify with decompilation before treating as real secrets."
+        )
+        for r in binary_medium:
+            parts.append(f"  {r['file']}:{r['line']}  entropy={r['entropy']}")
+            parts.append(f"    {r['match']}")
+        parts.append("")
+
+    # Separate remaining text-pattern results by entropy
     pattern_results = [r for r in results if r.get("category") == "credential_pattern"]
 
     high_entropy: list[dict[str, str]] = []
@@ -561,14 +714,14 @@ async def _handle_find_hardcoded_credentials(
             low_entropy.append(r)
 
     if high_entropy:
-        parts.append(f"## Likely Real Secrets (high entropy >4.0 bits) — {len(high_entropy)}")
+        parts.append(f"## Likely Real Secrets in Text Files (high entropy >4.0 bits) — {len(high_entropy)}")
         for r in high_entropy:
             parts.append(f"  {r['file']}:{r['line']}  entropy={r['entropy']}")
             parts.append(f"    {r['match']}")
         parts.append("")
 
     if low_entropy:
-        parts.append(f"## Possible Credentials (lower entropy) — {len(low_entropy)}")
+        parts.append(f"## Possible Credentials in Text Files (lower entropy) — {len(low_entropy)}")
         for r in low_entropy:
             parts.append(f"  {r['file']}:{r['line']}  entropy={r['entropy']}")
             parts.append(f"    {r['match']}")
@@ -661,15 +814,21 @@ def register_string_tools(registry: ToolRegistry) -> None:
     registry.register(
         name="find_hardcoded_credentials",
         description=(
-            "Search firmware filesystem for hardcoded passwords, API keys, tokens, "
-            "and other credentials. Enhanced analysis includes:\n"
+            "Search firmware for hardcoded passwords, API keys, tokens, and "
+            "other credentials. Coverage:\n"
             "- /etc/shadow & /etc_ro/shadow: hash type identification (DES, MD5, "
             "SHA-256, SHA-512), weak hash flagging, and cracking against 15 common "
             "default passwords (admin, root, password, 1234, etc.)\n"
             "- /etc/passwd & /etc_ro/passwd: UID-0 non-root accounts, empty password "
             "fields with login shells\n"
-            "- Filesystem scan: password/secret/token assignments in text files\n"
-            "Results ranked by Shannon entropy. Max 100 results."
+            "- Text files: password/secret/token assignments via regex patterns, "
+            "ranked by Shannon entropy.\n"
+            "- ELF binary rodata: 32/40/64-hex-character strings (MD5/SHA-1/SHA-256, "
+            "API keys, app secrets) and magic-key-shaped tokens (uppercase prefix + "
+            "digits). The binary scan is what surfaces the kind of compiled-in "
+            "credentials embedded firmware typically uses — flagship binary apps "
+            "rarely keep their keys in /etc/.\n"
+            "Max 100 results."
         ),
         input_schema={
             "type": "object",
