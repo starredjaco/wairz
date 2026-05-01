@@ -27,15 +27,16 @@ class ToolContext:
         """Resolve a virtual firmware path to a real filesystem path.
 
         Handles virtual top-level paths like /rootfs/..., /jffs2-root/...,
-        /_carved/..., etc. when the corresponding root is configured.
-        Falls back to simple validation against extracted_path for legacy
-        (non-virtual) mode.
+        /_carved/..., /firmware/... etc. when the corresponding root is
+        configured. Falls back to simple validation against extracted_path
+        for legacy (non-virtual) mode.
         """
         from app.services.file_service import FileService
         svc = FileService(
             self.extracted_path,
             extraction_dir=self.extraction_dir,
             carved_path=self.carved_path,
+            firmware_path=self.storage_path,
         )
         return svc._resolve(path)
 
@@ -66,6 +67,7 @@ class ToolContext:
             self.extracted_path,
             extraction_dir=self.extraction_dir,
             carved_path=self.carved_path,
+            firmware_path=self.storage_path,
         )
         # Paths inside rootfs
         if not clean or clean == svc.ROOTFS_VNAME or clean.startswith(svc.ROOTFS_VNAME + "/"):
@@ -91,6 +93,7 @@ class ToolContext:
             self.extracted_path,
             extraction_dir=self.extraction_dir,
             carved_path=self.carved_path,
+            firmware_path=self.storage_path,
         )
         return svc.to_virtual_path(abs_path)
 

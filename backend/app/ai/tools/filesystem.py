@@ -119,7 +119,7 @@ def _find_files_by_type(
 
 
 async def _handle_list_directory(input: dict, context: ToolContext) -> str:
-    svc = FileService(context.extracted_path, extraction_dir=context.extraction_dir, carved_path=context.carved_path)
+    svc = FileService(context.extracted_path, extraction_dir=context.extraction_dir, carved_path=context.carved_path, firmware_path=context.storage_path)
     entries, truncated = svc.list_directory(input["path"])
 
     if not entries:
@@ -143,7 +143,7 @@ async def _handle_list_directory(input: dict, context: ToolContext) -> str:
 
 
 async def _handle_read_file(input: dict, context: ToolContext) -> str:
-    svc = FileService(context.extracted_path, extraction_dir=context.extraction_dir, carved_path=context.carved_path)
+    svc = FileService(context.extracted_path, extraction_dir=context.extraction_dir, carved_path=context.carved_path, firmware_path=context.storage_path)
     content = svc.read_file(
         path=input["path"],
         offset=input.get("offset", 0),
@@ -159,7 +159,7 @@ async def _handle_read_file(input: dict, context: ToolContext) -> str:
 
 
 async def _handle_file_info(input: dict, context: ToolContext) -> str:
-    svc = FileService(context.extracted_path, extraction_dir=context.extraction_dir, carved_path=context.carved_path)
+    svc = FileService(context.extracted_path, extraction_dir=context.extraction_dir, carved_path=context.carved_path, firmware_path=context.storage_path)
     info = svc.file_info(input["path"])
 
     lines = [
@@ -179,7 +179,7 @@ async def _handle_file_info(input: dict, context: ToolContext) -> str:
 
 
 async def _handle_search_files(input: dict, context: ToolContext) -> str:
-    svc = FileService(context.extracted_path, extraction_dir=context.extraction_dir, carved_path=context.carved_path)
+    svc = FileService(context.extracted_path, extraction_dir=context.extraction_dir, carved_path=context.carved_path, firmware_path=context.storage_path)
     matches, truncated = svc.search_files(
         pattern=input["pattern"],
         path=input.get("path", "/"),
