@@ -14,6 +14,8 @@ class UnpackResult:
     endianness: str | None = None
     os_info: str | None = None
     kernel_path: str | None = None
+    firmware_kind: str = "unknown"
+    rtos_flavor: str | None = None
     unpack_log: str = ""
     success: bool = False
     error: str | None = None
@@ -476,11 +478,30 @@ async def unpack_firmware(firmware_path: str, output_base_dir: str) -> UnpackRes
     )
     result.unpack_log = (result.unpack_log or "") + "\n" + dispatcher_log
 
-    # Step 2: Find the filesystem root
+    # Step 2: Find the filesystem root (Linux signal)
     fs_root = find_filesystem_root(extraction_dir)
+
+    # Step 2a: Classify the firmware kind. If we found a rootfs, the
+    # detector trusts that; otherwise it scans the raw image and any
+    # extracted blobs for RTOS signatures.
+    from app.services.rtos_detection_service import detect_firmware_kind
+
+    detection = detect_firmware_kind(firmware_path, extraction_dir, fs_root)
+    result.firmware_kind = detection.kind
+    result.rtos_flavor = detection.flavor
+    result.unpack_log = (result.unpack_log or "") + f"\nkind detection: {detection.notes}"
+
     if not fs_root:
-        result.error = "Could not locate filesystem root in extracted contents"
+        # Non-Linux path: only succeed if we positively recognised an
+        # RTOS. An unknown image has no rootfs to mount and no RTOS
+        # workflow to run, so keep the error behaviour the frontend
+        # already handles (offer to upload-rootfs).
+        if detection.kind == "rtos":
+            result.success = True
+        else:
+            result.error = "Could not locate filesystem root in extracted contents"
         return result
+
     result.extracted_path = fs_root
 
     # Step 2b: Determine the binwalk output directory (parent of rootfs).
