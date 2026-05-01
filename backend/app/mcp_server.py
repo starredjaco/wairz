@@ -84,6 +84,7 @@ class ProjectState:
     extracted_path: str = ""
     extraction_dir: str | None = None
     carved_path: str | None = None
+    storage_path: str | None = None
     firmware_loaded: bool = False
     # Firmware kind drives which MCP tools are exposed (linux/rtos/unknown).
     # When firmware isn't loaded we default to "unknown" so kind-tagged tools
@@ -350,8 +351,9 @@ async def _load_project_state(
             state.firmware_filename = firmware.original_filename or "unknown"
             state.architecture = firmware.architecture
             state.endianness = firmware.endianness
-            state.extracted_path = firmware.extracted_path
+            state.extracted_path = firmware.extracted_path or ""
             state.extraction_dir = firmware.extraction_dir
+            state.storage_path = firmware.storage_path
             # Carving-sandbox outputs live next to the original blob.
             if firmware.storage_path:
                 state.carved_path = os.path.join(
@@ -359,7 +361,11 @@ async def _load_project_state(
                 )
             else:
                 state.carved_path = None
-            state.firmware_loaded = True
+            # An RTOS firmware has no mountable rootfs but is still "loaded"
+            # for analysis purposes — its raw blob is what tools work on.
+            state.firmware_loaded = bool(
+                firmware.extracted_path or firmware.storage_path
+            )
             state.firmware_kind = firmware.firmware_kind or "unknown"
             state.rtos_flavor = firmware.rtos_flavor
         else:
@@ -370,17 +376,21 @@ async def _load_project_state(
             state.extracted_path = ""
             state.extraction_dir = None
             state.carved_path = None
+            state.storage_path = None
             state.firmware_loaded = False
             state.firmware_kind = "unknown"
             state.rtos_flavor = None
 
     # Apply path translation
     if host_storage_root and state.firmware_loaded:
-        state.extracted_path = _translate_path(state.extracted_path, host_storage_root)
+        if state.extracted_path:
+            state.extracted_path = _translate_path(state.extracted_path, host_storage_root)
         if state.extraction_dir:
             state.extraction_dir = _translate_path(state.extraction_dir, host_storage_root)
         if state.carved_path:
             state.carved_path = _translate_path(state.carved_path, host_storage_root)
+        if state.storage_path:
+            state.storage_path = _translate_path(state.storage_path, host_storage_root)
 
     return firmware_count
 
@@ -451,7 +461,10 @@ async def run_server(
                 state.firmware_id,
             )
 
-        if not os.path.isdir(state.extracted_path):
+        # RTOS/unknown firmware has no rootfs — skip the directory check and
+        # rely on storage_path instead. We still validate when extracted_path
+        # is set (Linux case).
+        if state.extracted_path and not os.path.isdir(state.extracted_path):
             logger.error(
                 "Extracted firmware path does not exist: %s",
                 state.extracted_path,
@@ -462,6 +475,12 @@ async def run_server(
                 "     docker exec -i wairz-backend-1 uv run wairz-mcp --project-id %s\n"
                 "  2. Set STORAGE_ROOT in .env to point to a local copy of the firmware data",
                 project_id,
+            )
+            sys.exit(1)
+        if not state.extracted_path and state.storage_path and not os.path.isfile(state.storage_path):
+            logger.error(
+                "Firmware storage path does not exist: %s",
+                state.storage_path,
             )
             sys.exit(1)
 
@@ -559,7 +578,18 @@ async def run_server(
         except ValueError as exc:
             return f"Error: {exc}"
 
-        if state.firmware_loaded and not os.path.isdir(state.extracted_path):
+        # Linux-style projects must have a real rootfs directory; RTOS
+        # projects expose a storage_path instead. Validate whichever one
+        # this project relies on.
+        rootfs_missing = (
+            state.extracted_path and not os.path.isdir(state.extracted_path)
+        )
+        blob_missing = (
+            not state.extracted_path
+            and state.storage_path
+            and not os.path.isfile(state.storage_path)
+        )
+        if state.firmware_loaded and (rootfs_missing or blob_missing):
             # Revert to old project + firmware
             try:
                 await _load_project_state(
@@ -571,8 +601,9 @@ async def run_server(
                 )
             except ValueError:
                 pass
+            bad_path = state.extracted_path or state.storage_path
             return (
-                f"Error: Extracted firmware path does not exist: {state.extracted_path}\n"
+                f"Error: Firmware path does not exist: {bad_path}\n"
                 f"Reverted to project '{old_name}'."
             )
 
@@ -736,6 +767,7 @@ async def run_server(
                 db=session,
                 extraction_dir=state.extraction_dir,
                 carved_path=state.carved_path,
+                storage_path=state.storage_path,
             )
             try:
                 result = await registry.execute(name, arguments, context)

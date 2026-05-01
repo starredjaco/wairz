@@ -7,6 +7,7 @@ from app.ai.tools.emulation import register_emulation_tools
 from app.ai.tools.fuzzing import register_fuzzing_tools
 from app.ai.tools.filesystem import register_filesystem_tools
 from app.ai.tools.reporting import register_reporting_tools
+from app.ai.tools.rtos import register_rtos_tools
 from app.ai.tools.sbom import register_sbom_tools
 from app.ai.tools.security import register_security_tools
 from app.ai.tools.strings import register_string_tools
@@ -28,4 +29,5 @@ def create_tool_registry() -> ToolRegistry:
     register_comparison_tools(registry)
     register_uart_tools(registry)
     register_carving_tools(registry)
+    register_rtos_tools(registry)
     return registry
