@@ -93,6 +93,16 @@ services:
         limits:
           memory: 2048M
 
+  # Image-only service: built by docker compose so the backend can spawn
+  # ephemeral carving sandboxes via the Docker SDK. Never runs from compose.
+  carving:
+    build:
+      context: ./carving
+      dockerfile: Dockerfile
+    image: wairz-carving
+    profiles:
+      - build-only
+
   frontend:
     build:
       context: ./frontend

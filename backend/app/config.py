@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     fuzzing_memory_limit_mb: int = 2048
     fuzzing_cpu_limit: float = 2.0
     fuzzing_data_dir: str = "/data/fuzzing"
+    carving_image: str = "wairz-carving"
+    carving_memory_limit_mb: int = 1024
+    carving_cpu_limit: float = 1.0
+    carving_default_timeout: int = 60
+    carving_max_timeout: int = 600
     uart_bridge_host: str = "host.docker.internal"
     uart_bridge_port: int = 9999
     uart_command_timeout: int = 30

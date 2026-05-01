@@ -83,6 +83,7 @@ class ProjectState:
     endianness: str | None = None
     extracted_path: str = ""
     extraction_dir: str | None = None
+    carved_path: str | None = None
     firmware_loaded: bool = False
 
 
@@ -346,6 +347,13 @@ async def _load_project_state(
             state.endianness = firmware.endianness
             state.extracted_path = firmware.extracted_path
             state.extraction_dir = firmware.extraction_dir
+            # Carving-sandbox outputs live next to the original blob.
+            if firmware.storage_path:
+                state.carved_path = os.path.join(
+                    os.path.dirname(firmware.storage_path), "carved"
+                )
+            else:
+                state.carved_path = None
             state.firmware_loaded = True
         else:
             state.firmware_id = uuid.UUID(int=0)
@@ -354,6 +362,7 @@ async def _load_project_state(
             state.endianness = None
             state.extracted_path = ""
             state.extraction_dir = None
+            state.carved_path = None
             state.firmware_loaded = False
 
     # Apply path translation
@@ -361,6 +370,8 @@ async def _load_project_state(
         state.extracted_path = _translate_path(state.extracted_path, host_storage_root)
         if state.extraction_dir:
             state.extraction_dir = _translate_path(state.extraction_dir, host_storage_root)
+        if state.carved_path:
+            state.carved_path = _translate_path(state.carved_path, host_storage_root)
 
     return firmware_count
 
@@ -689,6 +700,7 @@ async def run_server(
                 extracted_path=state.extracted_path,
                 db=session,
                 extraction_dir=state.extraction_dir,
+                carved_path=state.carved_path,
             )
             try:
                 result = await registry.execute(name, arguments, context)

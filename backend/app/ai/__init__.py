@@ -1,5 +1,6 @@
 from app.ai.tool_registry import ToolRegistry
 from app.ai.tools.binary import register_binary_tools
+from app.ai.tools.carving import register_carving_tools
 from app.ai.tools.comparison import register_comparison_tools
 from app.ai.tools.documents import register_document_tools
 from app.ai.tools.emulation import register_emulation_tools
@@ -26,4 +27,5 @@ def create_tool_registry() -> ToolRegistry:
     register_fuzzing_tools(registry)
     register_comparison_tools(registry)
     register_uart_tools(registry)
+    register_carving_tools(registry)
     return registry

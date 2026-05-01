@@ -8,6 +8,7 @@ from starlette.requests import Request
 
 from app.config import get_settings
 from app.routers import analysis, comparison, component_map, documents, emulation, export_import, files, findings, firmware, fuzzing, kernels, projects, sbom, terminal, uart
+from app.services.carving_service import CarvingService
 from app.utils.sandbox import PathTraversalError
 
 
@@ -16,6 +17,9 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     os.makedirs(settings.storage_root, exist_ok=True)
     os.makedirs(settings.emulation_kernel_dir, exist_ok=True)
+    # Reap any carving sandboxes left running by a previous backend process
+    # so we don't accumulate orphans across restarts.
+    CarvingService.cleanup_orphans()
     yield
 
 

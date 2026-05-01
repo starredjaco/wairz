@@ -15,6 +15,7 @@ class ToolContext:
     extracted_path: str
     db: AsyncSession
     extraction_dir: str | None = None
+    carved_path: str | None = None
     review_id: UUID | None = None
     review_agent_id: UUID | None = None
 
@@ -22,11 +23,16 @@ class ToolContext:
         """Resolve a virtual firmware path to a real filesystem path.
 
         Handles virtual top-level paths like /rootfs/..., /jffs2-root/...,
-        etc. when extraction_dir is set.  Falls back to simple validation
-        against extracted_path for legacy (non-virtual) mode.
+        /_carved/..., etc. when the corresponding root is configured.
+        Falls back to simple validation against extracted_path for legacy
+        (non-virtual) mode.
         """
         from app.services.file_service import FileService
-        svc = FileService(self.extracted_path, extraction_dir=self.extraction_dir)
+        svc = FileService(
+            self.extracted_path,
+            extraction_dir=self.extraction_dir,
+            carved_path=self.carved_path,
+        )
         return svc._resolve(path)
 
     def real_root_for(self, path: str) -> str:
@@ -43,10 +49,20 @@ class ToolContext:
         """
         import os
         from app.services.file_service import FileService
+        clean = path.strip("/")
+        # Paths inside the carved-output namespace
+        if self.carved_path and (
+            clean == FileService.CARVED_VNAME
+            or clean.startswith(FileService.CARVED_VNAME + "/")
+        ):
+            return os.path.realpath(self.carved_path)
         if not self.extraction_dir:
             return os.path.realpath(self.extracted_path)
-        svc = FileService(self.extracted_path, extraction_dir=self.extraction_dir)
-        clean = path.strip("/")
+        svc = FileService(
+            self.extracted_path,
+            extraction_dir=self.extraction_dir,
+            carved_path=self.carved_path,
+        )
         # Paths inside rootfs
         if not clean or clean == svc.ROOTFS_VNAME or clean.startswith(svc.ROOTFS_VNAME + "/"):
             return os.path.realpath(self.extracted_path)
@@ -67,7 +83,11 @@ class ToolContext:
         None if abs_path is outside every sandboxed root.
         """
         from app.services.file_service import FileService
-        svc = FileService(self.extracted_path, extraction_dir=self.extraction_dir)
+        svc = FileService(
+            self.extracted_path,
+            extraction_dir=self.extraction_dir,
+            carved_path=self.carved_path,
+        )
         return svc.to_virtual_path(abs_path)
 
 
