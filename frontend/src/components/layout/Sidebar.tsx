@@ -28,7 +28,7 @@ interface SidebarProps {
 
 interface SubPage {
   suffix: string
-  label: string
+  label: string | ((kind: FirmwareKind | 'no-firmware') => string)
   icon: typeof LayoutDashboard
   // Which firmware kinds expose this tab. Tabs not listed for a kind are
   // hidden from the sidebar — most analysis pages are Linux-only because
@@ -40,7 +40,14 @@ const ALL_KINDS = ['linux', 'rtos', 'unknown', 'no-firmware'] as const
 
 const projectSubPages: ReadonlyArray<SubPage> = [
   { suffix: '', label: 'Overview', icon: LayoutDashboard, kinds: ALL_KINDS },
-  { suffix: '/explore', label: 'File Explorer', icon: FolderSearch, kinds: ['linux'] },
+  {
+    suffix: '/explore',
+    // Linux projects browse the firmware rootfs + project documents;
+    // RTOS / unknown / no-firmware only have project documents to edit.
+    label: (kind) => (kind === 'linux' ? 'File Explorer' : 'Project Files'),
+    icon: FolderSearch,
+    kinds: ALL_KINDS,
+  },
   { suffix: '/rtos', label: 'RTOS Analysis', icon: Cpu, kinds: ['rtos'] },
   { suffix: '/findings', label: 'Findings', icon: ShieldAlert, kinds: ALL_KINDS },
   { suffix: '/map', label: 'Component Map', icon: Network, kinds: ['linux'] },
@@ -50,11 +57,23 @@ const projectSubPages: ReadonlyArray<SubPage> = [
   { suffix: '/compare', label: 'Compare', icon: GitCompareArrows, kinds: ['linux'] },
 ]
 
-function subPagesFor(kind: FirmwareKind | null): ReadonlyArray<SubPage> {
+interface ResolvedSubPage {
+  suffix: string
+  label: string
+  icon: typeof LayoutDashboard
+}
+
+function subPagesFor(kind: FirmwareKind | null): ResolvedSubPage[] {
   // Projects without firmware get the same tab set as 'unknown' — only
-  // the overview makes sense before upload.
+  // overview / findings / project-files make sense before upload.
   const effective: FirmwareKind | 'no-firmware' = kind ?? 'no-firmware'
-  return projectSubPages.filter((p) => p.kinds.includes(effective))
+  return projectSubPages
+    .filter((p) => p.kinds.includes(effective))
+    .map((p) => ({
+      suffix: p.suffix,
+      label: typeof p.label === 'function' ? p.label(effective) : p.label,
+      icon: p.icon,
+    }))
 }
 
 export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
