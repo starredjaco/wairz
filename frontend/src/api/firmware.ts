@@ -1,5 +1,11 @@
 import apiClient from './client'
-import type { FirmwareDetail, FirmwareMetadata, FirmwareSummary } from '@/types'
+import type {
+  FirmwareDetail,
+  FirmwareKind,
+  FirmwareMetadata,
+  FirmwareSummary,
+  RtosFlavor,
+} from '@/types'
 
 export async function uploadFirmware(
   projectId: string,
@@ -64,6 +70,19 @@ export async function deleteFirmware(
   firmwareId: string,
 ): Promise<void> {
   await apiClient.delete(`/projects/${projectId}/firmware/${firmwareId}`)
+}
+
+export async function updateFirmwareKind(
+  projectId: string,
+  firmwareId: string,
+  kind: FirmwareKind,
+  rtosFlavor: RtosFlavor | null = null,
+): Promise<FirmwareDetail> {
+  const { data } = await apiClient.patch<FirmwareDetail>(
+    `/projects/${projectId}/firmware/${firmwareId}/kind`,
+    { kind, rtos_flavor: rtosFlavor },
+  )
+  return data
 }
 
 export async function unpackFirmware(

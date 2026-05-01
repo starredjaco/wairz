@@ -43,6 +43,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             },
         },
         handler=_handle_list_kernels,
+        applies_to=("linux",),
     )
 
     registry.register(
@@ -87,6 +88,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "required": ["url", "name", "architecture"],
         },
         handler=_handle_download_kernel,
+        applies_to=("linux",),
     )
 
     registry.register(
@@ -189,6 +191,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "required": ["mode"],
         },
         handler=_handle_start_emulation,
+        applies_to=("linux",),
     )
 
     registry.register(
@@ -244,6 +247,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "required": ["session_id", "command"],
         },
         handler=_handle_run_command,
+        applies_to=("linux",),
     )
 
     registry.register(
@@ -263,6 +267,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "required": ["session_id"],
         },
         handler=_handle_stop_emulation,
+        applies_to=("linux",),
     )
 
     registry.register(
@@ -282,6 +287,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             },
         },
         handler=_handle_check_status,
+        applies_to=("linux",),
     )
 
     registry.register(
@@ -305,6 +311,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "required": ["session_id"],
         },
         handler=_handle_get_logs,
+        applies_to=("linux",),
     )
 
     registry.register(
@@ -324,6 +331,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "properties": {},
         },
         handler=_handle_diagnose_environment,
+        applies_to=("linux",),
     )
 
     registry.register(
@@ -350,6 +358,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             },
         },
         handler=_handle_troubleshoot_emulation,
+        applies_to=("linux",),
     )
 
     registry.register(
@@ -372,6 +381,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "required": ["session_id"],
         },
         handler=_handle_enumerate_services,
+        applies_to=("linux",),
     )
 
     # ── Core Dumps & GDB Debugging ──
@@ -404,6 +414,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "required": ["session_id"],
         },
         handler=_handle_get_crash_dump,
+        applies_to=("linux",),
     )
 
     registry.register(
@@ -448,6 +459,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "required": ["session_id", "gdb_commands"],
         },
         handler=_handle_run_gdb_command,
+        applies_to=("linux",),
     )
 
     # ── Emulation Presets ──
@@ -516,6 +528,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "required": ["name", "mode"],
         },
         handler=_handle_save_preset,
+        applies_to=("linux",),
     )
 
     registry.register(
@@ -529,6 +542,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             "properties": {},
         },
         handler=_handle_list_presets,
+        applies_to=("linux",),
     )
 
     registry.register(
@@ -551,6 +565,7 @@ def register_emulation_tools(registry: ToolRegistry) -> None:
             },
         },
         handler=_handle_start_from_preset,
+        applies_to=("linux",),
     )
 
 
