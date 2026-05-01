@@ -10,6 +10,7 @@ import SbomPage from '@/pages/SbomPage'
 import EmulationPage from '@/pages/EmulationPage'
 import FuzzingPage from '@/pages/FuzzingPage'
 import ComparisonPage from '@/pages/ComparisonPage'
+import RTOSAnalysisPage from '@/pages/RTOSAnalysisPage'
 import HelpPage from '@/pages/HelpPage'
 import NotFoundPage from '@/pages/NotFoundPage'
 
@@ -29,6 +30,7 @@ export default function App() {
           <Route path="/projects/:projectId/emulation" element={<EmulationPage />} />
           <Route path="/projects/:projectId/fuzzing" element={<FuzzingPage />} />
           <Route path="/projects/:projectId/compare" element={<ComparisonPage />} />
+          <Route path="/projects/:projectId/rtos" element={<RTOSAnalysisPage />} />
           <Route path="/help" element={<HelpPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>

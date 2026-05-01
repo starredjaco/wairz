@@ -72,8 +72,32 @@ async def create_project(data: ProjectCreate, db: AsyncSession = Depends(get_db)
 
 @router.get("", response_model=list[ProjectListResponse])
 async def list_projects(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).order_by(Project.created_at.desc()))
-    return result.scalars().all()
+    # Eager-load firmware so we can surface the active firmware's kind
+    # without making the sidebar fetch each project's detail separately.
+    result = await db.execute(
+        select(Project)
+        .options(selectinload(Project.firmware))
+        .order_by(Project.created_at.desc())
+    )
+    projects = result.scalars().all()
+    out = []
+    for p in projects:
+        # Use the most recently uploaded firmware as the "active" one —
+        # matches the MCP server's default-firmware selection.
+        active_fw = max(p.firmware, key=lambda f: f.created_at) if p.firmware else None
+        out.append(
+            ProjectListResponse(
+                id=p.id,
+                name=p.name,
+                description=p.description,
+                status=p.status,
+                created_at=p.created_at,
+                updated_at=p.updated_at,
+                firmware_kind=active_fw.firmware_kind if active_fw else None,
+                rtos_flavor=active_fw.rtos_flavor if active_fw else None,
+            )
+        )
+    return out
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
