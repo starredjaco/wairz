@@ -1,4 +1,5 @@
 import dataclasses
+import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -28,7 +29,16 @@ async def get_file_service(
             raise HTTPException(404, "No firmware uploaded for this project")
     if not firmware.extracted_path:
         raise HTTPException(400, "Firmware not yet unpacked")
-    return FileService(firmware.extracted_path, extraction_dir=firmware.extraction_dir)
+    carved_path = (
+        os.path.join(os.path.dirname(firmware.storage_path), "carved")
+        if firmware.storage_path
+        else None
+    )
+    return FileService(
+        firmware.extracted_path,
+        extraction_dir=firmware.extraction_dir,
+        carved_path=carved_path,
+    )
 
 
 @router.get("")

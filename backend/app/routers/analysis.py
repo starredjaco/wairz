@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -47,10 +48,20 @@ async def _resolve_firmware(
 def _resolve_path(firmware, path: str) -> str:
     """Resolve a virtual firmware path using FileService.
 
-    Handles virtual prefixes like /rootfs/ that the file explorer adds,
-    so analysis endpoints work consistently with the file browser.
+    Handles virtual prefixes like /rootfs/ and /_carved/ that the file
+    explorer adds, so analysis endpoints work consistently with the file
+    browser.
     """
-    svc = FileService(firmware.extracted_path, extraction_dir=firmware.extraction_dir)
+    carved_path = (
+        os.path.join(os.path.dirname(firmware.storage_path), "carved")
+        if firmware.storage_path
+        else None
+    )
+    svc = FileService(
+        firmware.extracted_path,
+        extraction_dir=firmware.extraction_dir,
+        carved_path=carved_path,
+    )
     return svc._resolve(path)
 
 
