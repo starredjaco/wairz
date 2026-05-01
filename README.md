@@ -13,6 +13,7 @@ Connect any MCP-compatible AI agent to Wairz's 60+ analysis tools — [Claude Co
 ## Features
 
 - **Firmware Unpacking** — Automatic extraction of SquashFS, JFFS2, UBIFS, CramFS, ext, and CPIO filesystems via binwalk, with multi-partition support
+- **RTOS Support** — Auto-classifies firmware as `linux | rtos | unknown` on unpack (FreeRTOS / Zephyr / baremetal Cortex-M), with manual override. RTOS projects get a dedicated tool category for vector-table parsing, task enumeration, base-address recovery, and memory-map analysis on raw `.axf` / `.elf` blobs
 - **File Explorer** — Browse extracted filesystems with a virtual tree, view text/binary/hex content, and search across files
 - **Binary Analysis** — Disassemble and decompile binaries using radare2 and Ghidra headless, with cross-reference and taint analysis
 - **Component Map** — Interactive dependency graph showing binaries, libraries, scripts, and their relationships
@@ -59,7 +60,7 @@ Optional:
 
 WAIRZ is currently in **public beta**. You may encounter bugs or rough edges. If you run into any issues, please [open an issue on GitHub](https://github.com/digitalandrew/wairz/issues) or reach out at andrew@digitalandrew.io.
 
-WAIRZ is currently designed for **embedded Linux** firmware samples. Support for RTOS and bare-metal firmware is planned for future releases.
+WAIRZ supports **embedded Linux**, **FreeRTOS**, **Zephyr**, and **baremetal Cortex-M** firmware. Auto-detection runs on unpack and can be overridden from the project page. Linux-specific tools (emulation, init-script analysis, SBOM, etc.) are hidden on RTOS projects, and a dedicated RTOS tool category is exposed in their place. See [RTOS support](docs/features/rtos.md) for details.
 
 ## Quick Start
 
