@@ -12,6 +12,7 @@ from app.models.firmware import Firmware
 from app.models.project import Project
 from app.schemas.firmware import (
     FirmwareDetailResponse,
+    FirmwareKindUpdate,
     FirmwareMetadataResponse,
     FirmwareUpdate,
     FirmwareUploadResponse,
@@ -78,6 +79,29 @@ async def update_firmware(
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(firmware, key, value)
+    await service.db.flush()
+    return firmware
+
+
+@router.patch("/{firmware_id}/kind", response_model=FirmwareDetailResponse)
+async def update_firmware_kind(
+    project_id: uuid.UUID,
+    firmware_id: uuid.UUID,
+    data: FirmwareKindUpdate,
+    service: FirmwareService = Depends(get_firmware_service),
+):
+    """Manually override the detected firmware kind (Linux vs RTOS).
+
+    Sets firmware_kind_source='manual' so detection re-runs won't clobber
+    the user's choice.
+    """
+    firmware = await service.get_by_id(firmware_id)
+    if not firmware or firmware.project_id != project_id:
+        raise HTTPException(404, "Firmware not found")
+
+    firmware.firmware_kind = data.kind
+    firmware.rtos_flavor = data.rtos_flavor if data.kind == "rtos" else None
+    firmware.firmware_kind_source = "manual"
     await service.db.flush()
     return firmware
 
@@ -167,6 +191,15 @@ async def _run_unpack_background(
                 else:
                     firmware.unpack_log = result.unpack_log
                     project.status = "error"
+
+                # Persist auto-detected kind regardless of unpack success
+                # — even an "error" image is useful info for the user.
+                # Manual overrides win: if the user already pinned the
+                # kind via the dropdown, leave their choice alone.
+                if firmware.firmware_kind_source != "manual":
+                    firmware.firmware_kind = result.firmware_kind
+                    firmware.rtos_flavor = result.rtos_flavor
+                    firmware.firmware_kind_source = "detected"
 
                 await db.commit()
             except Exception:

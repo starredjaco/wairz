@@ -7,6 +7,7 @@ import {
   isPlaceholder,
   type TreeNode,
 } from '@/stores/explorerStore'
+import { useProjectStore } from '@/stores/projectStore'
 import { getFileIcon } from '@/utils/fileIcons'
 import { formatFileSize } from '@/utils/format'
 
@@ -93,6 +94,14 @@ export default function FileTree() {
   const [newNoteTitle, setNewNoteTitle] = useState('')
   const newNoteInputRef = useRef<HTMLInputElement>(null)
 
+  // Documents-only mode: skip the firmware filesystem pane when the
+  // project doesn't have a Linux rootfs to walk (RTOS / unknown / no
+  // firmware uploaded yet).
+  const project = useProjectStore((s) =>
+    projectId ? s.projects.find((p) => p.id === projectId) : undefined,
+  )
+  const hasFirmwareFs = project?.firmware_kind === 'linux'
+
   const containerRef = useRef<HTMLDivElement>(null)
   const treeRef = useRef<TreeApi<TreeNode>>(null)
   const [height, setHeight] = useState(400)
@@ -112,10 +121,12 @@ export default function FileTree() {
     return () => observer.disconnect()
   }, [])
 
-  // Load root on mount
+  // Load firmware filesystem root on mount — only when there is one to
+  // load. RTOS / unknown projects skip this so listDirectory doesn't
+  // error out against an empty extracted_path.
   useEffect(() => {
-    if (projectId) loadRootDirectory(projectId)
-  }, [projectId, loadRootDirectory])
+    if (projectId && hasFirmwareFs) loadRootDirectory(projectId)
+  }, [projectId, hasFirmwareFs, loadRootDirectory])
 
   // Update visible node count for dynamic tree height
   useEffect(() => {
@@ -269,39 +280,45 @@ export default function FileTree() {
     )
   }
 
-  // Size tree to its content, capped at available space
+  // Size tree to its content, capped at available space. When the firmware
+  // filesystem is hidden (RTOS / unknown), the documents section gets the
+  // full pane.
   const newNoteRowHeight = showNewNote ? 32 : 0
-  const docsHeight = documents.length > 0 || showNewNote || documentsLoading
-    ? Math.min(documents.length * 28 + 36 + newNoteRowHeight, 220)
-    : 36
+  const docsHeight = !hasFirmwareFs
+    ? height
+    : documents.length > 0 || showNewNote || documentsLoading
+      ? Math.min(documents.length * 28 + 36 + newNoteRowHeight, 220)
+      : 36
   const maxTreeHeight = Math.max(height - docsHeight, 100)
   const contentHeight = visibleCount * 28
   const treeHeight = visibleCount > 0 ? Math.min(contentHeight, maxTreeHeight) : maxTreeHeight
 
   return (
     <div ref={containerRef} className="relative flex-1 overflow-hidden" onContextMenu={handleContextMenu}>
-      <div style={{ height: treeHeight }}>
-        <Tree<TreeNode>
-          ref={treeRef}
-          data={treeData}
-          width="100%"
-          height={treeHeight}
-          rowHeight={28}
-          indent={16}
-          openByDefault={false}
-          disableDrag
-          disableDrop
-          disableEdit
-          disableMultiSelection
-          onToggle={handleToggle}
-          onActivate={handleActivate}
-        >
-          {Node}
-        </Tree>
-      </div>
+      {hasFirmwareFs && (
+        <div style={{ height: treeHeight }}>
+          <Tree<TreeNode>
+            ref={treeRef}
+            data={treeData}
+            width="100%"
+            height={treeHeight}
+            rowHeight={28}
+            indent={16}
+            openByDefault={false}
+            disableDrag
+            disableDrop
+            disableEdit
+            disableMultiSelection
+            onToggle={handleToggle}
+            onActivate={handleActivate}
+          >
+            {Node}
+          </Tree>
+        </div>
+      )}
 
       {/* Project Documents section */}
-      <div className="border-t border-border">
+      <div className={hasFirmwareFs ? 'border-t border-border' : ''}>
           <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
             <FileText className="h-3.5 w-3.5" />
             Documents

@@ -16,6 +16,10 @@ class ToolContext:
     db: AsyncSession
     extraction_dir: str | None = None
     carved_path: str | None = None
+    # Path to the original firmware blob (e.g. an .axf / .bin). Required by
+    # RTOS tooling because RTOS images don't have a mountable rootfs to
+    # search via extracted_path.
+    storage_path: str | None = None
     review_id: UUID | None = None
     review_agent_id: UUID | None = None
 
@@ -23,15 +27,16 @@ class ToolContext:
         """Resolve a virtual firmware path to a real filesystem path.
 
         Handles virtual top-level paths like /rootfs/..., /jffs2-root/...,
-        /_carved/..., etc. when the corresponding root is configured.
-        Falls back to simple validation against extracted_path for legacy
-        (non-virtual) mode.
+        /_carved/..., /firmware/... etc. when the corresponding root is
+        configured. Falls back to simple validation against extracted_path
+        for legacy (non-virtual) mode.
         """
         from app.services.file_service import FileService
         svc = FileService(
             self.extracted_path,
             extraction_dir=self.extraction_dir,
             carved_path=self.carved_path,
+            firmware_path=self.storage_path,
         )
         return svc._resolve(path)
 
@@ -62,6 +67,7 @@ class ToolContext:
             self.extracted_path,
             extraction_dir=self.extraction_dir,
             carved_path=self.carved_path,
+            firmware_path=self.storage_path,
         )
         # Paths inside rootfs
         if not clean or clean == svc.ROOTFS_VNAME or clean.startswith(svc.ROOTFS_VNAME + "/"):
@@ -87,8 +93,15 @@ class ToolContext:
             self.extracted_path,
             extraction_dir=self.extraction_dir,
             carved_path=self.carved_path,
+            firmware_path=self.storage_path,
         )
         return svc.to_virtual_path(abs_path)
+
+
+# Sentinel meaning "this tool applies to every firmware kind". Tools default to
+# this — only tag when the tool is meaningfully kind-specific (e.g. requires a
+# Linux rootfs, or only makes sense for an RTOS image).
+ALL_KINDS: tuple[str, ...] = ("linux", "rtos", "unknown")
 
 
 @dataclass
@@ -97,6 +110,7 @@ class ToolDefinition:
     description: str
     input_schema: dict
     handler: Callable[[dict, ToolContext], Awaitable[str]]
+    applies_to: tuple[str, ...] = ALL_KINDS
 
 
 class ToolRegistry:
@@ -109,12 +123,14 @@ class ToolRegistry:
         description: str,
         input_schema: dict,
         handler: Callable[[dict, ToolContext], Awaitable[str]],
+        applies_to: tuple[str, ...] = ALL_KINDS,
     ) -> None:
         self._tools[name] = ToolDefinition(
             name=name,
             description=description,
             input_schema=input_schema,
             handler=handler,
+            applies_to=applies_to,
         )
 
     def subset(self, tool_names: list[str]) -> "ToolRegistry":
@@ -123,6 +139,18 @@ class ToolRegistry:
         for name in tool_names:
             if name in self._tools:
                 new_registry._tools[name] = self._tools[name]
+        return new_registry
+
+    def for_kind(self, kind: str) -> "ToolRegistry":
+        """Return a new ToolRegistry with only the tools that apply to *kind*.
+
+        Tools without an explicit applies_to default to ALL_KINDS and pass
+        through unchanged.
+        """
+        new_registry = ToolRegistry()
+        for name, tool in self._tools.items():
+            if kind in tool.applies_to:
+                new_registry._tools[name] = tool
         return new_registry
 
     def get_anthropic_tools(self) -> list[dict]:

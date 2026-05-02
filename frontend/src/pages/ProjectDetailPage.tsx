@@ -19,14 +19,29 @@ import {
   Pencil,
   Check,
   X,
+  ChevronDown,
 } from 'lucide-react'
 import { useProjectStore } from '@/stores/projectStore'
-import { listFirmware, deleteFirmware, updateFirmware, uploadRootfs } from '@/api/firmware'
-import type { FirmwareDetail } from '@/types'
+import {
+  listFirmware,
+  deleteFirmware,
+  updateFirmware,
+  updateFirmwareKind,
+  uploadRootfs,
+} from '@/api/firmware'
+import type { FirmwareDetail, FirmwareKind, RtosFlavor } from '@/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { formatFileSize, formatDate } from '@/utils/format'
 import FirmwareUpload from '@/components/projects/FirmwareUpload'
 import FirmwareMetadataCard from '@/components/projects/FirmwareMetadataCard'
@@ -39,6 +54,17 @@ const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | '
   unpacking: 'secondary',
   error: 'destructive',
   created: 'outline',
+}
+
+function formatKind(kind: FirmwareKind | undefined, flavor: RtosFlavor | null | undefined): string {
+  if (kind === 'rtos') {
+    if (flavor === 'freertos') return 'RTOS · FreeRTOS'
+    if (flavor === 'zephyr') return 'RTOS · Zephyr'
+    if (flavor === 'baremetal-cortexm') return 'Bare-metal Cortex-M'
+    return 'RTOS'
+  }
+  if (kind === 'linux') return 'Linux'
+  return 'Unknown'
 }
 
 export default function ProjectDetailPage() {
@@ -174,6 +200,21 @@ export default function ProjectDetailPage() {
       // error handled by caller
     }
     setEditingVersionLabel(null)
+  }
+
+  const handleKindChange = async (
+    firmwareId: string,
+    kind: FirmwareKind,
+    flavor: RtosFlavor | null,
+  ) => {
+    if (!projectId) return
+    try {
+      await updateFirmwareKind(projectId, firmwareId, kind, flavor)
+      fetchProject(projectId)
+      listFirmware(projectId).then(setFirmwareList).catch(() => {})
+    } catch {
+      // error surfacing handled at a higher level if needed
+    }
   }
 
   const handleRootfsUpload = async (firmwareId: string, file: File) => {
@@ -315,6 +356,39 @@ export default function ProjectDetailPage() {
                       {isUnpacked && (
                         <Badge variant="default" className="text-xs">unpacked</Badge>
                       )}
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Badge
+                            variant="outline"
+                            className="text-xs cursor-pointer hover:bg-secondary/50"
+                          >
+                            {formatKind(fw.firmware_kind, fw.rtos_flavor)}
+                            <ChevronDown className="ml-1 h-2.5 w-2.5 opacity-60" />
+                          </Badge>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start">
+                          <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+                            Kind ({fw.firmware_kind_source ?? 'unset'})
+                          </DropdownMenuLabel>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem onClick={() => handleKindChange(fw.id, 'linux', null)}>
+                            Linux
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleKindChange(fw.id, 'rtos', 'freertos')}>
+                            RTOS · FreeRTOS
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleKindChange(fw.id, 'rtos', 'zephyr')}>
+                            RTOS · Zephyr
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleKindChange(fw.id, 'rtos', 'baremetal-cortexm')}>
+                            Bare-metal Cortex-M
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem onClick={() => handleKindChange(fw.id, 'unknown', null)}>
+                            Unknown
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </CardTitle>
                     <div className="flex gap-1">
                       {!isUnpacked && !hasError && (

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from mcp.server import Server
+from mcp.server import NotificationOptions, Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
     GetPromptResult,
@@ -84,7 +84,13 @@ class ProjectState:
     extracted_path: str = ""
     extraction_dir: str | None = None
     carved_path: str | None = None
+    storage_path: str | None = None
     firmware_loaded: bool = False
+    # Firmware kind drives which MCP tools are exposed (linux/rtos/unknown).
+    # When firmware isn't loaded we default to "unknown" so kind-tagged tools
+    # are filtered out — only the project-management tools remain.
+    firmware_kind: str = "unknown"
+    rtos_flavor: str | None = None
 
 
 def _resolve_storage_root() -> str | None:
@@ -263,13 +269,25 @@ def _select_firmware(
     if not firmwares:
         raise ValueError("Project has no firmware uploaded.")
 
+    # A firmware is "loadable" once unpack has produced something analysable:
+    #   - Linux: a rootfs at extracted_path
+    #   - RTOS: the original blob at storage_path (no rootfs to mount)
+    # Unknown-kind firmware needs the user to set the kind manually first.
+    def _is_loadable(fw: Firmware) -> bool:
+        if fw.extracted_path:
+            return True
+        if fw.firmware_kind == "rtos" and fw.storage_path:
+            return True
+        return False
+
     if firmware_id is not None:
         for fw in firmwares:
             if fw.id == firmware_id:
-                if not fw.extracted_path:
+                if not _is_loadable(fw):
                     raise ValueError(
-                        f"Firmware {firmware_id} has not been unpacked "
-                        f"(no extracted_path). Upload status must be 'unpacked'."
+                        f"Firmware {firmware_id} has not finished unpacking "
+                        f"or its kind is still 'unknown'. Run unpack and/or "
+                        f"set the kind on the project page first."
                     )
                 return fw
         available = ", ".join(str(fw.id) for fw in firmwares)
@@ -278,16 +296,16 @@ def _select_firmware(
             f"Available firmware IDs: {available}"
         )
 
-    unpacked = [fw for fw in firmwares if fw.extracted_path]
-    if not unpacked:
+    loadable = [fw for fw in firmwares if _is_loadable(fw)]
+    if not loadable:
         raise ValueError(
-            "No firmware in this project has been unpacked yet. "
-            "Trigger unpack via the web UI or POST /api/v1/projects/<id>/firmware/<id>/unpack "
-            "before starting the MCP server."
+            "No firmware in this project is ready for analysis. "
+            "Trigger unpack via the web UI or POST /api/v1/projects/<id>/firmware/<id>/unpack, "
+            "and confirm the kind is set if detection fell back to 'unknown'."
         )
 
-    unpacked.sort(key=lambda fw: fw.created_at)
-    return unpacked[0]
+    loadable.sort(key=lambda fw: fw.created_at)
+    return loadable[0]
 
 
 async def _load_project(
@@ -345,8 +363,9 @@ async def _load_project_state(
             state.firmware_filename = firmware.original_filename or "unknown"
             state.architecture = firmware.architecture
             state.endianness = firmware.endianness
-            state.extracted_path = firmware.extracted_path
+            state.extracted_path = firmware.extracted_path or ""
             state.extraction_dir = firmware.extraction_dir
+            state.storage_path = firmware.storage_path
             # Carving-sandbox outputs live next to the original blob.
             if firmware.storage_path:
                 state.carved_path = os.path.join(
@@ -354,7 +373,13 @@ async def _load_project_state(
                 )
             else:
                 state.carved_path = None
-            state.firmware_loaded = True
+            # An RTOS firmware has no mountable rootfs but is still "loaded"
+            # for analysis purposes — its raw blob is what tools work on.
+            state.firmware_loaded = bool(
+                firmware.extracted_path or firmware.storage_path
+            )
+            state.firmware_kind = firmware.firmware_kind or "unknown"
+            state.rtos_flavor = firmware.rtos_flavor
         else:
             state.firmware_id = uuid.UUID(int=0)
             state.firmware_filename = "unknown"
@@ -363,15 +388,21 @@ async def _load_project_state(
             state.extracted_path = ""
             state.extraction_dir = None
             state.carved_path = None
+            state.storage_path = None
             state.firmware_loaded = False
+            state.firmware_kind = "unknown"
+            state.rtos_flavor = None
 
     # Apply path translation
     if host_storage_root and state.firmware_loaded:
-        state.extracted_path = _translate_path(state.extracted_path, host_storage_root)
+        if state.extracted_path:
+            state.extracted_path = _translate_path(state.extracted_path, host_storage_root)
         if state.extraction_dir:
             state.extraction_dir = _translate_path(state.extraction_dir, host_storage_root)
         if state.carved_path:
             state.carved_path = _translate_path(state.carved_path, host_storage_root)
+        if state.storage_path:
+            state.storage_path = _translate_path(state.storage_path, host_storage_root)
 
     return firmware_count
 
@@ -442,7 +473,10 @@ async def run_server(
                 state.firmware_id,
             )
 
-        if not os.path.isdir(state.extracted_path):
+        # RTOS/unknown firmware has no rootfs — skip the directory check and
+        # rely on storage_path instead. We still validate when extracted_path
+        # is set (Linux case).
+        if state.extracted_path and not os.path.isdir(state.extracted_path):
             logger.error(
                 "Extracted firmware path does not exist: %s",
                 state.extracted_path,
@@ -453,6 +487,12 @@ async def run_server(
                 "     docker exec -i wairz-backend-1 uv run wairz-mcp --project-id %s\n"
                 "  2. Set STORAGE_ROOT in .env to point to a local copy of the firmware data",
                 project_id,
+            )
+            sys.exit(1)
+        if not state.extracted_path and state.storage_path and not os.path.isfile(state.storage_path):
+            logger.error(
+                "Firmware storage path does not exist: %s",
+                state.storage_path,
             )
             sys.exit(1)
 
@@ -478,9 +518,13 @@ async def run_server(
             f"Description: {state.project_desc or '(none)'}",
         ]
         if state.firmware_loaded:
+            kind_label = state.firmware_kind
+            if state.firmware_kind == "rtos" and state.rtos_flavor:
+                kind_label = f"rtos ({state.rtos_flavor})"
             lines.extend([
                 f"Firmware: {state.firmware_filename}",
                 f"Firmware ID: {state.firmware_id}",
+                f"Kind: {kind_label}",
                 f"Architecture: {state.architecture or 'unknown'}",
                 f"Endianness: {state.endianness or 'unknown'}",
                 f"Extracted Path: {state.extracted_path}",
@@ -534,6 +578,7 @@ async def run_server(
         old_name = state.project_name
         old_id = state.project_id
         old_firmware_id = state.firmware_id if state.firmware_loaded else None
+        old_kind = state.firmware_kind
 
         try:
             await _load_project_state(
@@ -546,7 +591,18 @@ async def run_server(
         except ValueError as exc:
             return f"Error: {exc}"
 
-        if state.firmware_loaded and not os.path.isdir(state.extracted_path):
+        # Linux-style projects must have a real rootfs directory; RTOS
+        # projects expose a storage_path instead. Validate whichever one
+        # this project relies on.
+        rootfs_missing = (
+            state.extracted_path and not os.path.isdir(state.extracted_path)
+        )
+        blob_missing = (
+            not state.extracted_path
+            and state.storage_path
+            and not os.path.isfile(state.storage_path)
+        )
+        if state.firmware_loaded and (rootfs_missing or blob_missing):
             # Revert to old project + firmware
             try:
                 await _load_project_state(
@@ -558,8 +614,9 @@ async def run_server(
                 )
             except ValueError:
                 pass
+            bad_path = state.extracted_path or state.storage_path
             return (
-                f"Error: Extracted firmware path does not exist: {state.extracted_path}\n"
+                f"Error: Firmware path does not exist: {bad_path}\n"
                 f"Reverted to project '{old_name}'."
             )
 
@@ -571,13 +628,27 @@ async def run_server(
             state.project_id,
         )
 
+        # If the firmware kind changed, the visible tool set changes too —
+        # tell the client to re-fetch list_tools so kind-tagged tools come
+        # and go without requiring an MCP reconnect.
+        if state.firmware_kind != old_kind:
+            try:
+                await server.request_context.session.send_tool_list_changed()
+            except Exception:
+                # Notification is best-effort; never fail switch_project on it.
+                logger.exception("send_tool_list_changed failed")
+
         lines = [
             f"Switched to project '{state.project_name}'.",
             f"  Project ID: {state.project_id}",
         ]
         if state.firmware_loaded:
+            kind_label = state.firmware_kind
+            if state.firmware_kind == "rtos" and state.rtos_flavor:
+                kind_label = f"rtos ({state.rtos_flavor})"
             lines.extend([
                 f"  Firmware: {state.firmware_filename}",
+                f"  Kind: {kind_label}",
                 f"  Architecture: {state.architecture or 'unknown'}",
                 f"  Endianness: {state.endianness or 'unknown'}",
             ])
@@ -659,10 +730,15 @@ async def run_server(
     server = Server("wairz")
 
     # --- Tool listing ---
+    # Filter dynamically on each call so switch_project (which mutates state
+    # in place) immediately changes the visible tool surface.
     @server.list_tools()
     async def list_tools() -> list[Tool]:
+        kind = state.firmware_kind
         tools = []
         for tool_def in registry._tools.values():
+            if kind not in tool_def.applies_to:
+                continue
             tools.append(
                 Tool(
                     name=tool_def.name,
@@ -693,6 +769,19 @@ async def run_server(
                     "change to a project that has firmware available."
                 ),
             )]
+        # Defense in depth: even if the client has a stale tool list, refuse
+        # to run tools that don't apply to this firmware's kind.
+        tool_def = registry._tools.get(name)
+        if tool_def is not None and state.firmware_kind not in tool_def.applies_to:
+            return [TextContent(
+                type="text",
+                text=(
+                    f"Error: Tool '{name}' does not apply to this project "
+                    f"(firmware_kind='{state.firmware_kind}', "
+                    f"tool applies to: {', '.join(tool_def.applies_to)}). "
+                    f"Change the firmware kind in the Wairz UI if this is wrong."
+                ),
+            )]
         async with session_factory() as session:
             context = ToolContext(
                 project_id=state.project_id,
@@ -701,6 +790,7 @@ async def run_server(
                 db=session,
                 extraction_dir=state.extraction_dir,
                 carved_path=state.carved_path,
+                storage_path=state.storage_path,
             )
             try:
                 result = await registry.execute(name, arguments, context)
@@ -725,12 +815,16 @@ async def run_server(
     @server.read_resource()
     async def read_resource(uri) -> str:
         if str(uri) == "wairz://project/info":
+            kind_label = state.firmware_kind
+            if state.firmware_kind == "rtos" and state.rtos_flavor:
+                kind_label = f"rtos ({state.rtos_flavor})"
             lines = [
                 f"Project: {state.project_name}",
                 f"Description: {state.project_desc}",
                 f"Project ID: {state.project_id}",
                 f"Firmware: {state.firmware_filename}",
                 f"Firmware ID: {state.firmware_id}",
+                f"Kind: {kind_label}",
                 f"Architecture: {state.architecture or 'unknown'}",
                 f"Endianness: {state.endianness or 'unknown'}",
                 f"Extracted Path: {state.extracted_path}",
@@ -762,6 +856,8 @@ async def run_server(
                 architecture=state.architecture,
                 endianness=state.endianness,
                 extracted_path=state.extracted_path,
+                firmware_kind=state.firmware_kind,
+                rtos_flavor=state.rtos_flavor,
             )
             return GetPromptResult(
                 description="Wairz firmware analysis system prompt",
@@ -776,12 +872,19 @@ async def run_server(
 
     # --- Run ---
     logger.info("Starting Wairz MCP server (stdio transport)...")
+    # Advertise list-changed support in the server capabilities so clients
+    # subscribe to notifications/tools/list_changed (emitted from
+    # switch_project when the active firmware kind changes the visible
+    # tool set).
+    init_options = server.create_initialization_options(
+        notification_options=NotificationOptions(
+            tools_changed=True,
+            resources_changed=True,
+            prompts_changed=True,
+        ),
+    )
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
-        )
+        await server.run(read_stream, write_stream, init_options)
 
 
 def main() -> None:

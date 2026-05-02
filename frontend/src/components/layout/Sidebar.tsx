@@ -13,27 +13,68 @@ import {
   Bug,
   GitCompareArrows,
   HelpCircle,
+  Cpu,
 } from 'lucide-react'
 import { Separator } from '@/components/ui/separator'
 import wairzLogo from '@/assets/wairz_full_logo.png'
 import wairzIcon from '@/assets/wairz_logo.png'
 import { useProjectStore } from '@/stores/projectStore'
+import type { FirmwareKind } from '@/types'
 
 interface SidebarProps {
   collapsed: boolean
   onToggle: () => void
 }
 
-const projectSubPages = [
-  { suffix: '', label: 'Overview', icon: LayoutDashboard },
-  { suffix: '/explore', label: 'File Explorer', icon: FolderSearch },
-  { suffix: '/findings', label: 'Findings', icon: ShieldAlert },
-  { suffix: '/map', label: 'Component Map', icon: Network },
-  { suffix: '/sbom', label: 'SBOM', icon: Package },
-  { suffix: '/emulation', label: 'Emulation (experimental)', icon: PlayCircle },
-  { suffix: '/fuzzing', label: 'Fuzzing (experimental)', icon: Bug },
-  { suffix: '/compare', label: 'Compare', icon: GitCompareArrows },
+interface SubPage {
+  suffix: string
+  label: string | ((kind: FirmwareKind | 'no-firmware') => string)
+  icon: typeof LayoutDashboard
+  // Which firmware kinds expose this tab. Tabs not listed for a kind are
+  // hidden from the sidebar — most analysis pages are Linux-only because
+  // they assume a mountable rootfs.
+  kinds: ReadonlyArray<FirmwareKind | 'no-firmware'>
+}
+
+const ALL_KINDS = ['linux', 'rtos', 'unknown', 'no-firmware'] as const
+
+const projectSubPages: ReadonlyArray<SubPage> = [
+  { suffix: '', label: 'Overview', icon: LayoutDashboard, kinds: ALL_KINDS },
+  {
+    suffix: '/explore',
+    // Linux projects browse the firmware rootfs + project documents;
+    // RTOS / unknown / no-firmware only have project documents to edit.
+    label: (kind) => (kind === 'linux' ? 'File Explorer' : 'Project Files'),
+    icon: FolderSearch,
+    kinds: ALL_KINDS,
+  },
+  { suffix: '/rtos', label: 'RTOS Analysis', icon: Cpu, kinds: ['rtos'] },
+  { suffix: '/findings', label: 'Findings', icon: ShieldAlert, kinds: ALL_KINDS },
+  { suffix: '/map', label: 'Component Map', icon: Network, kinds: ['linux'] },
+  { suffix: '/sbom', label: 'SBOM', icon: Package, kinds: ['linux'] },
+  { suffix: '/emulation', label: 'Emulation (experimental)', icon: PlayCircle, kinds: ['linux'] },
+  { suffix: '/fuzzing', label: 'Fuzzing (experimental)', icon: Bug, kinds: ['linux'] },
+  { suffix: '/compare', label: 'Compare', icon: GitCompareArrows, kinds: ['linux'] },
 ]
+
+interface ResolvedSubPage {
+  suffix: string
+  label: string
+  icon: typeof LayoutDashboard
+}
+
+function subPagesFor(kind: FirmwareKind | null): ResolvedSubPage[] {
+  // Projects without firmware get the same tab set as 'unknown' — only
+  // overview / findings / project-files make sense before upload.
+  const effective: FirmwareKind | 'no-firmware' = kind ?? 'no-firmware'
+  return projectSubPages
+    .filter((p) => p.kinds.includes(effective))
+    .map((p) => ({
+      suffix: p.suffix,
+      label: typeof p.label === 'function' ? p.label(effective) : p.label,
+      icon: p.icon,
+    }))
+}
 
 export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const { projectId: activeProjectId } = useParams<{ projectId: string }>()
@@ -170,7 +211,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
               {/* Sub-pages */}
               {isExpanded && (
                 <div className="ml-3 border-l border-border/50 pl-2">
-                  {projectSubPages.map((page) => (
+                  {subPagesFor(project.firmware_kind).map((page) => (
                     <NavLink
                       key={page.suffix}
                       to={`/projects/${project.id}${page.suffix}`}

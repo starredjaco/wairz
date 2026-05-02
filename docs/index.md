@@ -48,6 +48,10 @@ WAIRZ works with any MCP-compatible AI agent — Claude Code, Claude Desktop, Op
 
     AFL++ with QEMU mode for cross-architecture binary fuzzing, with automatic dictionary/corpus generation and crash triage.
 
+- :material-chip: **RTOS Support**
+
+    Auto-classifies firmware as Linux / FreeRTOS / Zephyr / baremetal Cortex-M on unpack. RTOS projects get a dedicated tool category for vector tables, task enumeration, base-address recovery, and memory maps.
+
 - :material-compare: **Firmware Comparison**
 
     Diff filesystem trees, binaries, and decompiled functions across firmware versions for patch analysis.
@@ -71,7 +75,7 @@ WAIRZ works with any MCP-compatible AI agent — Claude Code, Claude Desktop, Op
 !!! warning "Public Beta"
     WAIRZ is currently in **public beta**. You may encounter bugs or rough edges. If you run into any issues, please [open an issue on GitHub](https://github.com/digitalandrew/wairz/issues) or reach out at andrew@digitalandrew.io.
 
-    WAIRZ is currently designed for **embedded Linux** firmware samples. Support for RTOS and bare-metal firmware is planned for future releases.
+    WAIRZ supports **embedded Linux**, **FreeRTOS**, **Zephyr**, and **baremetal Cortex-M** firmware. Auto-detection runs on unpack and can be overridden from the project page. See [RTOS Support](features/rtos.md) for details.
 
 ---
 
